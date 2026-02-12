@@ -1,0 +1,3 @@
+This file is transferred over TCP.
+It supports automatic chunking.
+Larger files will also work.

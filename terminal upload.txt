@@ -1,0 +1,18 @@
+arduino-cli board list
+
+PORT=/dev/cu.usbmodem1101 
+FQBN=Seeeduino:nrf52:xiaonRF52840Sense
+-> or whatever else is listed 
+
+
+cd /PATH/TO/YOUR/SKETCH
+
+arduino-cli compile --fqbn Seeeduino:nrf52:xiaonRF52840Sense
+
+arduino-cli compile --fqbn Seeeduino:nrf52:xiaonRF52840Sense --export-binaries
+
+arduino-cli upload -p $PORT -b $FQBN
+
+if fials double tap reset 
+
+arduino-cli board list

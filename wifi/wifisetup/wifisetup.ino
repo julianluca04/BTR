@@ -2,7 +2,7 @@
 #include <WiFiUdp.h>
 
 /* ========= Wi-Fi Access Point Settings ========= */
-const char* ap_ssid = "ESP32_BROADCAST_NET";
+const char* ap_ssid = "esp32_test";
 const char* ap_password = "esp32test";  // must be ≥ 8 chars
 
 /* ========= UDP Settings ========= */
@@ -40,3 +40,15 @@ void loop() {
   Serial.println(msg);
   delay(1000);
 }
+
+/*
+python3 - << 'EOF'  
+import socket  
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  
+sock.bind(("", 4210))  
+print("Listening for UDP packets...")  
+while True:  
+data, addr = sock.recvfrom(1024)  
+print(f"From {addr}: {data.decode()}")  
+EOF
+*/
