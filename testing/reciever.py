@@ -33,7 +33,6 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     msg_count += 1
 
-                    # individual file per message
                     msg_filename = os.path.join(LOG_DIR, f"msg_{session_time}_{msg_count:03}.txt")
                     with open(msg_filename, "w") as f:
                         f.write(f"Timestamp : {timestamp}\n")
@@ -41,14 +40,12 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
                         f.write(f"Size      : {len(msg)} bytes\n")
                         f.write(f"Message   : {msg}\n")
 
-                    # summary log
                     summary_line = f"[{timestamp}] msg #{msg_count:03} | {len(msg)} bytes | {msg[:40]}{'...' if len(msg) > 40 else ''}"
                     summary.write(summary_line + "\n")
                     summary.flush()
 
-                    # terminal update
                     print(f"\n[{timestamp}] Message #{msg_count} received!")
                     print(f"  From    : {addr[0]}")
                     print(f"  Size    : {len(msg)} bytes")
                     print(f"  Content : {msg[:60]}{'...' if len(msg) > 60 else ''}")
-                    print(f"  Saved to: {msg_filename}")
+                    print(f"  Saved   : {msg_filename}")

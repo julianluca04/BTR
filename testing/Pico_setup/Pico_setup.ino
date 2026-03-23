@@ -3,10 +3,10 @@ bool started = false;
 
 void setup() {
   Serial.begin(115200);
-  Serial1.begin(115200); // GP4=TX, GP3=RX on mbed RP2040
+  Serial1.begin(115200); // GP0=TX, GP1=RX
   pinMode(LED_PIN, OUTPUT);
-  delay(2000);
-  Serial.println("Ready. Send 'go' to start.");
+  delay(4000);
+  Serial.println("[Pico] Ready. Send 'go' to start.");
 }
 
 void loop() {
@@ -15,7 +15,7 @@ void loop() {
     cmd.trim();
     if (cmd == "go") {
       started = true;
-      Serial.println("Starting transmission...");
+      Serial.println("[Pico] Starting transmission...");
     }
   }
 
@@ -35,6 +35,7 @@ void loop() {
       Serial.println(msg);
 
       Serial1.println(size);
+      delay(100);
       Serial1.println(msg);
 
       digitalWrite(LED_PIN, HIGH);
