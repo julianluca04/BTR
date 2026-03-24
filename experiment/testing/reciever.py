@@ -2,13 +2,10 @@ import socket
 import os
 from datetime import datetime
 
-# place wifi_logs in the same parent folder as this script
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(SCRIPT_DIR, "wifi_logs")
-SUMMARY_FILE = os.path.join(LOG_DIR, "summary.txt")
-
 HOST = "0.0.0.0"
 PORT = 8080
+LOG_DIR = "wifi_logs"
+SUMMARY_FILE = os.path.join(LOG_DIR, "summary.txt")
 
 os.makedirs(LOG_DIR, exist_ok=True)
 
