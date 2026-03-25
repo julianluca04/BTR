@@ -1,0 +1,2 @@
+resistor resistance is 1.11 ulm
+and the other being 1.13 ulm (used this one )
