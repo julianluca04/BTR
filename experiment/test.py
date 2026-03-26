@@ -23,9 +23,14 @@ PICO_BAUD      = 115200
 TCP_HOST       = "0.0.0.0"
 TCP_PORT       = 8080
 ESP32_SSID     = "esp32_test"
-IDLE_S         = 1.0   # idle buffer between payloads
-BASELINE_S     = 5.0   # pre-run baseline recording before Pico starts
-METER_WARMUP_S = 2.0   # dummy reads to flush meter pipeline before baseline
+IDLE_S         = 1.0
+BASELINE_S     = 5.0
+METER_WARMUP_S = 2.0
+TCP_ACCEPT_TIMEOUT  = 30
+TCP_RECEIVE_TIMEOUT = 60
+
+SHUNT_OHMS = 1.0
+V_SUPPLY   = 3.3
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 SESSION_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -55,29 +60,41 @@ def check_wifi():
 
 def connect_meter():
     rm = pyvisa.ResourceManager('@py')
-    resources = rm.list_resources()
-    print(f"[Meter] Found: {resources}")
-    hmc = next((r for r in resources if r.startswith("USB")), None)
-    if not hmc:
-        raise RuntimeError(f"HMC8012 not found. Available: {resources}")
-    meter = rm.open_resource(hmc)
-    meter.timeout = 10000
-    print(f"[Meter] {meter.query('*IDN?').strip()}")
-    meter.write("CONF:VOLT:DC")
-    meter.write("SENS:VOLT:DC:RANG:AUTO ON")
-    meter.write("SENS:VOLT:DC:NPLC 0.02")
+
+    def reopen_meter(retries=5, delay=1.0):
+        for attempt in range(retries):
+            try:
+                resources = rm.list_resources()
+                print(f"[Meter] Found: {resources}")
+                hmc = next((r for r in resources if r.startswith("USB")), None)
+                if not hmc:
+                    raise RuntimeError(f"HMC8012 not found. Available: {resources}")
+                m = rm.open_resource(hmc)
+                m.timeout = 10000
+                idn = m.query('*IDN?').strip()
+                print(f"[Meter] {idn}")
+                return m
+            except Exception as e:
+                print(f"[Meter] Connect attempt {attempt+1}/{retries} failed: {e}")
+                time.sleep(delay)
+        raise RuntimeError("[Meter] Could not connect after retries.")
+
+    meter = reopen_meter()
+
+    meter.write("CONF:RES")
+    meter.write("SENS:RES:RANG:AUTO ON")
+    meter.write("SENS:RES:NPLC 0.02")
     meter.write("TRIG:SOUR IMM")
     meter.write("TRIG:COUN INF")
+
     try:
-        nplc = meter.query("SENS:VOLT:DC:NPLC?").strip()
+        nplc = meter.query("SENS:RES:NPLC?").strip()
         print(f"[Meter] NPLC confirmed: {nplc} (0.02 = fastest)")
     except Exception:
         pass
-    print("[Meter] Configured for maximum sample rate.")
-    return meter
 
-def warmup_meter(meter):
-    """Send dummy reads to flush meter pipeline so first real reads are fast."""
+    print("[Meter] Configured for maximum sample rate (resistance).")
+
     print("[Meter] Warming up...")
     deadline = time.time() + METER_WARMUP_S
     count = 0
@@ -89,7 +106,9 @@ def warmup_meter(meter):
             pass
     print(f"[Meter] Warmup complete ({count} dummy reads in {METER_WARMUP_S}s).")
 
-# Shared phase tracker
+    return meter
+
+
 current_phase = "idle"
 phase_lock    = threading.Lock()
 
@@ -115,17 +134,39 @@ def meter_stream(meter, rows, stop_event, flush_callback):
             print(f"[Meter] Read error: {e}")
             time.sleep(0.2)
 
-def recv_exact(conn, expected_size, timeout=60):
+def recv_exact(conn, expected_size, total_timeout=TCP_RECEIVE_TIMEOUT):
     buf = b""
-    conn.settimeout(timeout)
+    deadline = time.time() + total_timeout
+    conn.settimeout(1.0)
     try:
         while len(buf) < expected_size:
-            chunk = conn.recv(min(4096, expected_size - len(buf)))
-            if not chunk:
+            if time.time() > deadline:
                 break
-            buf += chunk
-    except socket.timeout:
+            try:
+                chunk = conn.recv(min(4096, expected_size - len(buf)))
+                if not chunk:
+                    break
+                buf += chunk
+            except socket.timeout:
+                continue
+    except Exception:
         pass
+    return buf
+
+def recv_line(conn, max_bytes=64, total_timeout=10):
+    buf = b""
+    deadline = time.time() + total_timeout
+    conn.settimeout(1.0)
+    while b"\n" not in buf:
+        if time.time() > deadline:
+            break
+        try:
+            b = conn.recv(1)
+            if not b:
+                break
+            buf += b
+        except socket.timeout:
+            continue
     return buf
 
 def verify_payload(payload: bytes, payload_size: int, index: int) -> bool:
@@ -162,209 +203,184 @@ def run_experiment(run_number, meter, pico):
     stop_meter = threading.Event()
     set_phase("idle")
 
-    # TCP server — fresh socket each run
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((TCP_HOST, TCP_PORT))
     server.listen(1)
-    server.settimeout(30)
+    server.settimeout(TCP_ACCEPT_TIMEOUT)
 
-    # Wait for Pico READY — do NOT send go yet
-    print(f"\n[Run {run_number:02d}/{TOTAL_RUNS}] Waiting for Pico READY...")
-    if not wait_for_pico(pico, "READY", timeout=20):
-        print("[!] Pico did not send READY — skipping run.")
-        server.close()
-        return
+    try:
+        print(f"\n[Run {run_number:02d}/{TOTAL_RUNS}] Waiting for Pico READY...")
+        if not wait_for_pico(pico, "READY", timeout=20):
+            print("[!] Pico did not send READY — skipping run.")
+            return
 
-    # Open CSV and write headers before anything starts
-    csv_file = open(filename, "w", newline="")
-    w = csv.writer(csv_file)
+        csv_file = open(filename, "w", newline="")
+        w = csv.writer(csv_file)
 
-    def flush_meter_row(entry):
-        w.writerow([entry["timestamp"], entry["value"], entry["phase"]])
+        w.writerow(["# META"])
+        w.writerow(["module",      MODULE])
+        w.writerow(["strategy",    STRATEGY])
+        w.writerow(["run",         run_number])
+        w.writerow(["session",     SESSION_TAG])
+        w.writerow(["baseline_s",  BASELINE_S])
+        w.writerow(["shunt_ohms",  f"{SHUNT_OHMS:.6f}"])
+        w.writerow(["v_supply",    f"{V_SUPPLY:.3f}"])
+        w.writerow([])
+        w.writerow(["# EVENTS"])
+        w.writerow(["run", "payload_size", "declared_size",
+                    "bytes_received", "tx_start", "rx_end",
+                    "complete", "verified", "skip_reason"])
+        w.writerow([])
+        w.writerow(["# METER"])
+        w.writerow(["timestamp", "v_shunt", "phase"])
         csv_file.flush()
 
-    # Warmup meter pipeline so it's ready to read fast
-    warmup_meter(meter)
+        def flush_meter_row(entry):
+            w.writerow([entry["timestamp"], entry["value"], entry["phase"]])
+            csv_file.flush()
 
-    # Start meter thread and record baseline BEFORE sending go to Pico
-    print(f"[Run {run_number:02d}] Recording {BASELINE_S}s baseline before start...")
-    set_phase("baseline")
-    m_thread = threading.Thread(
-        target=meter_stream,
-        args=(meter, meter_rows, stop_meter, flush_meter_row),
-        daemon=True
-    )
-    m_thread.start()
-    time.sleep(BASELINE_S)
+        print(f"[Run {run_number:02d}] Recording {BASELINE_S}s baseline before start...")
+        set_phase("baseline")
+        m_thread = threading.Thread(
+            target=meter_stream,
+            args=(meter, meter_rows, stop_meter, flush_meter_row),
+            daemon=True
+        )
+        m_thread.start()
+        time.sleep(BASELINE_S)
 
-    # NOW send go to Pico
-    pico.write(b"go\n")
-    print(f"[Run {run_number:02d}] Sent 'go' to Pico.")
+        pico.write(b"go\n")
+        print(f"[Run {run_number:02d}] Sent 'go' to Pico.")
 
-    # Wait for START_IN_x
-    estimated_start = None
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        if pico.in_waiting:
+        estimated_start = None
+        delay_ms        = None
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if pico.in_waiting:
+                line = pico.readline().decode().strip()
+                if line:
+                    print(f"[Pico] {line}")
+                if line.startswith("START_IN_"):
+                    serial_rx_time  = datetime.now()
+                    delay_ms        = int(line.split("_")[2])
+                    estimated_start = serial_rx_time + timedelta(milliseconds=delay_ms)
+                    print(f"[Run {run_number:02d}] Start anchored: {estimated_start.isoformat()}")
+                    break
+            else:
+                time.sleep(0.05)
+
+        if estimated_start is None:
+            print("[!] No START_IN — aborting run.")
+            pico.write(b"SKIP\n")
+            stop_meter.set()
+            m_thread.join(timeout=3)
+            csv_file.close()
+            return
+
+        w.writerow(["estimated_start", estimated_start.isoformat()])
+        w.writerow(["start_delay_ms",  delay_ms])
+        csv_file.flush()
+
+        set_phase("idle")
+        time.sleep(IDLE_S)
+
+        skip_remaining = False
+
+        for i, payload_size in enumerate(PAYLOAD_SIZES):
+            if skip_remaining:
+                break
+
+            tx_start    = datetime.now().isoformat(timespec="milliseconds")
+            skip_reason = ""
+            print(f"  [→] {i+1}/{len(PAYLOAD_SIZES)} Waiting for {payload_size}B...")
+            set_phase(f"tx_{payload_size}")
+
+            try:
+                conn, addr = server.accept()
+                with conn:
+                    header   = recv_line(conn)
+                    declared = int(header.decode().strip().replace("SIZE:", ""))
+                    payload  = recv_exact(conn, declared)
+                    rx_end   = datetime.now().isoformat(timespec="milliseconds")
+
+                verified = verify_payload(payload, payload_size, i)
+                complete = len(payload) == declared
+
+                if verified:
+                    print(f"  [✓] {len(payload)}B verified at {rx_end}")
+                else:
+                    print(f"  [✗] {len(payload)}B FAILED at {rx_end}")
+
+                event_rows.append({
+                    "payload_size":   payload_size,
+                    "declared_size":  declared,
+                    "bytes_received": len(payload),
+                    "tx_start":       tx_start,
+                    "rx_end":         rx_end,
+                    "complete":       complete,
+                    "verified":       verified,
+                    "skip_reason":    "",
+                })
+                w.writerow([run_number, payload_size, declared,
+                            len(payload), tx_start, rx_end,
+                            complete, verified, ""])
+                csv_file.flush()
+                pico.write(b"ACK\n")
+
+            except socket.timeout:
+                esp32_fail = False
+                deadline2  = time.time() + 2
+                while time.time() < deadline2:
+                    if pico.in_waiting:
+                        line = pico.readline().decode().strip()
+                        if line:
+                            print(f"[Pico] {line}")
+                        if line.startswith("ESP32_FAIL"):
+                            esp32_fail  = True
+                            skip_reason = "esp32_malloc_fail"
+                            break
+                    time.sleep(0.05)
+
+                if not esp32_fail:
+                    skip_reason = "tcp_timeout"
+
+                print(f"  [!] {payload_size}B failed ({skip_reason}) — skipping remaining.")
+                event_rows.append({
+                    "payload_size":   payload_size,
+                    "declared_size":  payload_size,
+                    "bytes_received": 0,
+                    "tx_start":       tx_start,
+                    "rx_end":         "FAILED",
+                    "complete":       False,
+                    "verified":       False,
+                    "skip_reason":    skip_reason,
+                })
+                w.writerow([run_number, payload_size, payload_size,
+                            0, tx_start, "FAILED", False, False, skip_reason])
+                csv_file.flush()
+                pico.write(b"SKIP\n")
+                skip_remaining = True
+
+            set_phase("idle")
+            if not skip_remaining:
+                time.sleep(IDLE_S)
+
+        time.sleep(0.5)
+        while pico.in_waiting:
             line = pico.readline().decode().strip()
             if line:
                 print(f"[Pico] {line}")
-            if line.startswith("START_IN_"):
-                serial_rx_time  = datetime.now()
-                delay_ms        = int(line.split("_")[2])
-                estimated_start = serial_rx_time + timedelta(milliseconds=delay_ms)
-                print(f"[Run {run_number:02d}] Start anchored: {estimated_start.isoformat()}")
-                break
-        else:
-            time.sleep(0.05)
 
-    if estimated_start is None:
-        print("[!] No START_IN — aborting run.")
-        pico.write(b"SKIP\n")
         stop_meter.set()
         m_thread.join(timeout=3)
-        server.close()
         csv_file.close()
-        return
 
-    # Write full META block now that estimated_start is known
-    # Note: meter is already writing rows to csv_file via flush_meter_row,
-    # so we write META as comment rows that the meter rows will follow
-    # We use a separate events buffer and write it after meter stops
-    # to keep the file structure clean — events are flushed inline below
+        print(f"[Run {run_number:02d}] → {filename}  "
+              f"({len(meter_rows)} meter samples, {len(event_rows)} events)")
 
-    # Write META
-    w.writerow(["# META"])
-    w.writerow(["module",          MODULE])
-    w.writerow(["strategy",        STRATEGY])
-    w.writerow(["run",             run_number])
-    w.writerow(["session",         SESSION_TAG])
-    w.writerow(["estimated_start", estimated_start.isoformat()])
-    w.writerow(["start_delay_ms",  500])
-    w.writerow(["baseline_s",      BASELINE_S])
-    w.writerow(["shunt_ohms",      "FILL_IN"])
-    w.writerow(["v_supply",        3.3])
-    w.writerow([])
-
-    # Write EVENTS header
-    w.writerow(["# EVENTS"])
-    w.writerow(["run", "payload_size", "declared_size",
-                "bytes_received", "tx_start", "rx_end",
-                "complete", "verified", "skip_reason"])
-    w.writerow([])
-
-    # Write METER header — rows are being flushed live by meter thread
-    w.writerow(["# METER"])
-    w.writerow(["timestamp", "v_shunt", "phase"])
-    csv_file.flush()
-
-    # Idle between baseline end and first payload
-    set_phase("idle")
-    time.sleep(IDLE_S)
-
-    skip_remaining = False
-
-    for i, payload_size in enumerate(PAYLOAD_SIZES):
-        if skip_remaining:
-            break
-
-        tx_start = datetime.now().isoformat(timespec="milliseconds")
-        print(f"  [→] {i+1}/{len(PAYLOAD_SIZES)} Waiting for {payload_size}B...")
-        set_phase(f"tx_{payload_size}")
-
-        skip_reason = ""
-
-        try:
-            conn, addr = server.accept()
-            with conn:
-                header = b""
-                while b"\n" not in header:
-                    header += conn.recv(1)
-                declared = int(header.decode().strip().replace("SIZE:", ""))
-                payload  = recv_exact(conn, declared)
-                rx_end   = datetime.now().isoformat(timespec="milliseconds")
-
-            verified = verify_payload(payload, payload_size, i)
-            complete = len(payload) == declared
-
-            if verified:
-                print(f"  [✓] {len(payload)}B verified at {rx_end}")
-            else:
-                print(f"  [✗] {len(payload)}B FAILED at {rx_end}")
-
-            event_rows.append({
-                "payload_size":   payload_size,
-                "declared_size":  declared,
-                "bytes_received": len(payload),
-                "tx_start":       tx_start,
-                "rx_end":         rx_end,
-                "complete":       complete,
-                "verified":       verified,
-                "skip_reason":    "",
-            })
-            w.writerow([run_number, payload_size, declared,
-                        len(payload), tx_start, rx_end,
-                        complete, verified, ""])
-            csv_file.flush()
-
-            pico.write(b"ACK\n")
-
-        except socket.timeout:
-            # Check if Pico reported ESP32 malloc failure
-            esp32_fail = False
-            deadline2  = time.time() + 2
-            while time.time() < deadline2:
-                if pico.in_waiting:
-                    line = pico.readline().decode().strip()
-                    if line:
-                        print(f"[Pico] {line}")
-                    if line.startswith("ESP32_FAIL"):
-                        esp32_fail  = True
-                        skip_reason = "esp32_malloc_fail"
-                        break
-                time.sleep(0.05)
-
-            if not esp32_fail:
-                skip_reason = "tcp_timeout"
-
-            print(f"  [!] {payload_size}B failed ({skip_reason}) — skipping remaining.")
-            event_rows.append({
-                "payload_size":   payload_size,
-                "declared_size":  payload_size,
-                "bytes_received": 0,
-                "tx_start":       tx_start,
-                "rx_end":         "FAILED",
-                "complete":       False,
-                "verified":       False,
-                "skip_reason":    skip_reason,
-            })
-            w.writerow([run_number, payload_size, payload_size,
-                        0, tx_start, "FAILED", False, False, skip_reason])
-            csv_file.flush()
-
-            pico.write(b"SKIP\n")
-            skip_remaining = True
-
-        # Idle phase between payloads
-        set_phase("idle")
-        if not skip_remaining:
-            time.sleep(IDLE_S)
-
-    # Drain remaining Pico output
-    time.sleep(0.5)
-    while pico.in_waiting:
-        line = pico.readline().decode().strip()
-        if line:
-            print(f"[Pico] {line}")
-
-    stop_meter.set()
-    m_thread.join(timeout=3)
-    server.close()
-    csv_file.close()
-
-    print(f"[Run {run_number:02d}] → {filename}  "
-          f"({len(meter_rows)} meter samples, {len(event_rows)} events)")
+    finally:
+        server.close()
 
 
 if __name__ == "__main__":
@@ -384,7 +400,6 @@ if __name__ == "__main__":
 
     time.sleep(2)
     pico.reset_input_buffer()
-
     check_wifi()
 
     print(f"\nExperiment : {MODULE} | {STRATEGY}")

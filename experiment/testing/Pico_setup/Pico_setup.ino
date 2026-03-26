@@ -6,7 +6,7 @@ const int NUM_PAYLOADS = 21;
 const int PAYLOAD_SIZES[NUM_PAYLOADS] = {
   1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
   1024, 2048, 4096, 8192, 16384, 32768, 65536,
-  131072, 262144, 524288, 1048576
+  131072
 };
 const int SETTLE_MS      = 1000;
 const int START_DELAY_MS = 500;
@@ -33,7 +33,6 @@ void waitForAckOrSkip(bool &skipRun) {
     }
     delay(10);
   }
-  // Timeout waiting for ACK — treat as skip
   skipRun = true;
 }
 
@@ -72,11 +71,9 @@ void loop() {
     int size   = PAYLOAD_SIZES[i];
     char digit = '0' + (i % 10);
 
-    // Tell ESP32 payload size
     Serial1.println(size);
     delay(50);
 
-    // Send payload in 256B chunks
     int sent = 0;
     while (sent < size) {
       int chunk = min(256, size - sent);
@@ -84,9 +81,8 @@ void loop() {
       sent += chunk;
       delay(10);
     }
-    Serial1.println();  // trailing newline
+    Serial1.println();
 
-    // Wait for ESP32 response over UART (OK or FAIL)
     String esp32Response = "";
     unsigned long t = millis();
     while (millis() - t < 15000) {
@@ -101,11 +97,9 @@ void loop() {
     if (esp32Response == "FAIL") {
       Serial.print("ESP32_FAIL ");
       Serial.println(size);
-      // Tell Python to skip remaining
       waitForAckOrSkip(skipRun);
       skipRun = true;
     } else {
-      // OK or unknown — report sent and wait for Python ACK
       Serial.print("SENT ");
       Serial.print(size);
       Serial.println("B");

@@ -9,7 +9,7 @@ const char* AP_PASS = "esp32test";
 const char* MAC_IP  = "192.168.4.2";
 const int   MAC_PORT = 8080;
 
-const int MAX_PAYLOAD = 1048576;
+const int MAX_PAYLOAD = 131072;
 
 void setup() {
   Serial.begin(115200);
