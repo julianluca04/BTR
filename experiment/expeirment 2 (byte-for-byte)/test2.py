@@ -27,6 +27,7 @@ IDLE_S         = 1.0
 BASELINE_S     = 5.0
 METER_WARMUP_S = 2.0
 TCP_ACCEPT_TIMEOUT  = 30
+TCP_RECEIVE_TIMEOUT = 120
 
 SHUNT_OHMS = 1.0
 V_SUPPLY   = 3.3
@@ -35,9 +36,6 @@ SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 SESSION_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUT_DIR     = os.path.join(SCRIPT_DIR, "data", MODULE, STRATEGY, SESSION_TAG)
 os.makedirs(OUT_DIR, exist_ok=True)
-
-def tcp_timeout_for(payload_size):
-    return max(30, int(payload_size / 11520 * 4) + 90)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def check_wifi():
@@ -136,9 +134,10 @@ def meter_stream(meter, rows, stop_event, flush_callback):
             print(f"[Meter] Read error: {e}")
             time.sleep(0.2)
 
-def recv_exact(conn, expected_size, total_timeout):
+def recv_exact(conn, expected_size, total_timeout=TCP_RECEIVE_TIMEOUT):
     buf = b""
     deadline = time.time() + total_timeout
+    # Scale recv buffer: larger payloads benefit from bigger reads
     recv_buf = min(65536, max(4096, expected_size // 16))
     conn.settimeout(1.0)
     try:
@@ -149,6 +148,7 @@ def recv_exact(conn, expected_size, total_timeout):
             try:
                 chunk = conn.recv(min(recv_buf, expected_size - len(buf)))
                 if not chunk:
+                    # Connection closed by remote — stop immediately
                     if len(buf) < expected_size:
                         print(f"  [!] Connection closed early: {len(buf)}/{expected_size}B")
                     break
@@ -187,7 +187,7 @@ def verify_payload(payload: bytes, payload_size: int, index: int) -> bool:
         return False
     return True
 
-def wait_for_pico(pico, expected, timeout=60):
+def wait_for_pico(pico, expected, timeout=20):
     deadline = time.time() + timeout
     while time.time() < deadline:
         if pico.in_waiting:
@@ -299,8 +299,7 @@ def run_experiment(run_number, meter, pico):
 
             tx_start    = datetime.now().isoformat(timespec="milliseconds")
             skip_reason = ""
-            timeout     = tcp_timeout_for(payload_size)
-            print(f"  [→] {i+1}/{len(PAYLOAD_SIZES)} Waiting for {payload_size}B... (timeout {timeout}s)")
+            print(f"  [→] {i+1}/{len(PAYLOAD_SIZES)} Waiting for {payload_size}B...")
             set_phase(f"tx_{payload_size}")
 
             try:
@@ -308,7 +307,7 @@ def run_experiment(run_number, meter, pico):
                 with conn:
                     header   = recv_line(conn)
                     declared = int(header.decode().strip().replace("SIZE:", ""))
-                    payload  = recv_exact(conn, declared, total_timeout=timeout)
+                    payload  = recv_exact(conn, declared)
                     rx_end   = datetime.now().isoformat(timespec="milliseconds")
 
                 verified = verify_payload(payload, payload_size, i)
