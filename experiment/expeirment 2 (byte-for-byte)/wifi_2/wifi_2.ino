@@ -10,12 +10,12 @@ const char* AP_PASS = "esp32test";
 const char* MAC_IP  = "192.168.4.2";
 const int   MAC_PORT = 8080;
 
-const int WINDOW = 64;
+const int WINDOW = 2048;
 
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  picoSerial.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
+  picoSerial.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN, false, 4096);
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
@@ -71,7 +71,7 @@ void loop() {
 
   long forwarded = 0;
   int windowCount = 0;
-  uint8_t windowBuf[WINDOW];  // accumulate a full window before writing to TCP
+  uint8_t windowBuf[WINDOW];
   unsigned long lastByte = millis();
 
   while (forwarded < payloadSize) {
@@ -82,10 +82,7 @@ void loop() {
       lastByte = millis();
 
       if (windowCount >= WINDOW || forwarded == payloadSize) {
-        // Write the whole window to TCP in one call
         client.write(windowBuf, windowCount);
-
-        // Only signal RDY if more bytes remain
         if (forwarded < payloadSize) {
           picoSerial.println("RDY");
         }
@@ -98,8 +95,9 @@ void loop() {
   }
 
   client.flush();
-  delay(20);
+  delay(50);
   client.stop();
+  delay(100);
 
   if (forwarded == payloadSize) {
     Serial.print("[ESP32] Done ");

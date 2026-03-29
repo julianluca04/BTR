@@ -10,7 +10,7 @@ const long PAYLOAD_SIZES[NUM_PAYLOADS] = {
 };
 const int SETTLE_MS      = 1000;
 const int START_DELAY_MS = 500;
-const int WINDOW         = 64;
+const int WINDOW         = 2048;
 
 bool started = false;
 
@@ -75,7 +75,6 @@ void loop() {
 
     Serial1.println(size);
 
-    // Flush any stale bytes from previous transfer before starting
     delay(5);
     while (Serial1.available()) Serial1.read();
 
@@ -86,7 +85,6 @@ void loop() {
       Serial1.write(digit);
       sent++;
 
-      // After every WINDOW bytes, wait for RDY — but only if more bytes remain
       if (sent % WINDOW == 0 && sent < size) {
         unsigned long t = millis();
         bool gotRdy = false;
@@ -111,7 +109,6 @@ void loop() {
       continue;
     }
 
-    // Wait for final OK/FAIL from ESP32
     String esp32Response = "";
     unsigned long t = millis();
     while (millis() - t < 120000) {
