@@ -2,15 +2,16 @@
 
 const int LED_PIN = 25;
 
-const int NUM_PAYLOADS = 21;
+const int NUM_PAYLOADS = 20;
 const long PAYLOAD_SIZES[NUM_PAYLOADS] = {
   1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
   1024, 2048, 4096, 8192, 16384, 32768, 65536,
-  131072, 262144, 524288, 1048576
+  131072, 262144, 524288
 };
-const int SETTLE_MS      = 1000;
-const int START_DELAY_MS = 500;
-const int WINDOW         = 64;
+const int SETTLE_MS         = 1000;
+const int START_DELAY_MS    = 500;
+const int FLOW_WINDOW       = 64;
+const int ESP32_BOOT_TIMEOUT = 15000;
 
 bool started = false;
 
@@ -37,11 +38,31 @@ void waitForAckOrSkip(bool &skipRun) {
   skipRun = true;
 }
 
+bool waitForESP32Boot() {
+  unsigned long t = millis();
+  while (millis() - t < ESP32_BOOT_TIMEOUT) {
+    if (Serial1.available()) {
+      String msg = Serial1.readStringUntil('\n');
+      msg.trim();
+      if (msg == "BOOT") return true;
+    }
+    delay(10);
+  }
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
   Serial1.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   delay(2000);
+
+  Serial.println("[Pico] Waiting for ESP32 boot...");
+  if (waitForESP32Boot()) {
+    Serial.println("[Pico] ESP32 booted.");
+  } else {
+    Serial.println("[Pico] WARNING: ESP32 boot timeout on startup.");
+  }
 }
 
 void loop() {
@@ -75,7 +96,6 @@ void loop() {
 
     Serial1.println(size);
 
-    // Flush any stale bytes from previous transfer before starting
     delay(5);
     while (Serial1.available()) Serial1.read();
 
@@ -86,8 +106,7 @@ void loop() {
       Serial1.write(digit);
       sent++;
 
-      // After every WINDOW bytes, wait for RDY — but only if more bytes remain
-      if (sent % WINDOW == 0 && sent < size) {
+      if (sent % FLOW_WINDOW == 0 && sent < size) {
         unsigned long t = millis();
         bool gotRdy = false;
         while (millis() - t < 5000) {
@@ -111,7 +130,6 @@ void loop() {
       continue;
     }
 
-    // Wait for final OK/FAIL from ESP32
     String esp32Response = "";
     unsigned long t = millis();
     while (millis() - t < 120000) {
@@ -137,6 +155,15 @@ void loop() {
     }
 
     if (!skipRun) delay(SETTLE_MS);
+  }
+
+  // End of run — tell ESP32 to restart, then wait for it to come back
+  Serial1.println("DONE");
+  Serial.println("[Pico] Sent DONE to ESP32, waiting for reboot...");
+  if (!waitForESP32Boot()) {
+    Serial.println("[Pico] WARNING: ESP32 reboot timeout after run.");
+  } else {
+    Serial.println("[Pico] ESP32 rebooted cleanly.");
   }
 
   Serial.println("DONE");

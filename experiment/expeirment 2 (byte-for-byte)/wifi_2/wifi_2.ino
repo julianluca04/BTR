@@ -10,7 +10,7 @@ const char* AP_PASS = "esp32test";
 const char* MAC_IP  = "192.168.4.2";
 const int   MAC_PORT = 8080;
 
-const int WINDOW = 64;
+const int FLOW_WINDOW = 64;
 
 void setup() {
   Serial.begin(115200);
@@ -24,6 +24,8 @@ void setup() {
   Serial.print("[ESP32] AP IP: ");
   Serial.println(WiFi.softAPIP());
   Serial.println("[ESP32] Ready.");
+
+  picoSerial.println("BOOT");
 }
 
 void loop() {
@@ -49,6 +51,13 @@ void loop() {
     esp_deep_sleep_start();
     return;
   }
+  if (cmd == "DONE") {
+    // End of run — restart to clear heap fragmentation before next run
+    Serial.println("[ESP32] Run complete, restarting...");
+    delay(200);
+    ESP.restart();
+    return;
+  }
 
   long payloadSize = cmd.toInt();
   if (payloadSize <= 0) {
@@ -70,26 +79,20 @@ void loop() {
   client.print("SIZE:" + String(payloadSize) + "\n");
 
   long forwarded = 0;
-  int windowCount = 0;
-  uint8_t windowBuf[WINDOW];  // accumulate a full window before writing to TCP
+  long flowCount = 0;
   unsigned long lastByte = millis();
 
   while (forwarded < payloadSize) {
     if (picoSerial.available()) {
-      windowBuf[windowCount] = picoSerial.read();
-      windowCount++;
+      uint8_t b = picoSerial.read();
+      client.write(&b, 1);
       forwarded++;
+      flowCount++;
       lastByte = millis();
 
-      if (windowCount >= WINDOW || forwarded == payloadSize) {
-        // Write the whole window to TCP in one call
-        client.write(windowBuf, windowCount);
-
-        // Only signal RDY if more bytes remain
-        if (forwarded < payloadSize) {
-          picoSerial.println("RDY");
-        }
-        windowCount = 0;
+      if (flowCount >= FLOW_WINDOW && forwarded < payloadSize) {
+        picoSerial.println("RDY");
+        flowCount = 0;
       }
     } else if (millis() - lastByte > 10000) {
       Serial.println("[ESP32] Timeout waiting for bytes.");

@@ -10,12 +10,13 @@ from datetime import datetime, timedelta
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 MODULE        = "esp32"
-STRATEGY      = "full_payload"
+STRATEGY      = "byte_by_byte"   # change to "chunked_512" or "full_payload" per run
 TOTAL_RUNS    = 30
 PAYLOAD_SIZES = [
     1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
     1024, 2048, 4096, 8192, 16384, 32768, 65536,
-    131072, 262144, 524288, 1048576
+    131072, 262144, 524288
+    # 1048576 removed — heap fragmentation on ESP32-C3 above ~130KB across repeated runs
 ]
 
 PICO_PORT      = "/dev/tty.usbmodem21101"
@@ -37,7 +38,6 @@ SESSION_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUT_DIR     = os.path.join(SCRIPT_DIR, "data", MODULE, STRATEGY, SESSION_TAG)
 os.makedirs(OUT_DIR, exist_ok=True)
 # ──────────────────────────────────────────────────────────────────────────────
-
 def check_wifi():
     airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
     while True:
