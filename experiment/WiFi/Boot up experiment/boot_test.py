@@ -1,6 +1,8 @@
 import pyvisa
 import csv
 import os
+import sys
+import select
 import time
 from datetime import datetime
 
@@ -43,90 +45,91 @@ def connect_meter():
     print("[Meter] Ready.")
     return m
 
-def meter_readline(meter):
-    try:
-        raw = meter.query("READ?").strip()
-        ts  = datetime.now().isoformat(timespec="milliseconds")
-        return ts, raw
-    except Exception as e:
-        return None, None
+def enter_pressed():
+    return select.select([sys.stdin], [], [], 0)[0] != []
 
-def record_boot(meter, boot_number, csv_writer, csv_file):
+def drain_enter():
+    while select.select([sys.stdin], [], [], 0)[0]:
+        sys.stdin.readline()
+
+def record_boot(meter, boot_number):
+    filename = os.path.join(
+        OUT_DIR, f"{MODULE}_{MEASUREMENT}_boot{boot_number:02d}.csv"
+    )
+
     print(f"\n[Boot {boot_number:02d}/{TOTAL_BOOTS}]")
+    print(f"  Output: {filename}")
     print(f"  Meter is recording.")
     print(f"  Unplug Pico now, then press ENTER.")
+
+    drain_enter()
     input("  → ")
 
-    unplug_time = datetime.now().isoformat(timespec="milliseconds")
-    csv_writer.writerow(["EVENT", "unplug", unplug_time, boot_number])
-    csv_file.flush()
-    print(f"  [Unplug marked at {unplug_time}]")
-    print(f"  Replug Pico now. Watch for esp32_test WiFi or serial output.")
-    print(f"  When fully settled, press ENTER to mark end of boot.")
-
-    # Record continuously until user confirms boot is complete
-    samples = 0
-    stop = False
-
-    import threading
-    def wait_for_enter():
-        nonlocal stop
-        input("  → ")
-        stop = True
-
-    t = threading.Thread(target=wait_for_enter, daemon=True)
-    t.start()
-
-    # Record from unplug through replug through full boot settle
-    while not stop:
-        ts, raw = meter_readline(meter)
-        if ts and raw:
-            csv_writer.writerow(["METER", ts, raw, boot_number])
-            samples += 1
-
-    settled_time = datetime.now().isoformat(timespec="milliseconds")
-    csv_writer.writerow(["EVENT", "settled", settled_time, boot_number])
-    csv_file.flush()
-
-    print(f"  [✓] Boot settled at {settled_time} — {samples} samples recorded.")
-
-if __name__ == "__main__":
-    meter = connect_meter()
-
-    filename = os.path.join(OUT_DIR, f"{MODULE}_{MEASUREMENT}_{SESSION_TAG}.csv")
     csv_file = open(filename, "w", newline="")
     w = csv.writer(csv_file)
 
-    # Header
     w.writerow(["# META"])
     w.writerow(["module",      MODULE])
     w.writerow(["measurement", MEASUREMENT])
-    w.writerow(["boots",       TOTAL_BOOTS])
+    w.writerow(["boot_number", boot_number])
     w.writerow(["session",     SESSION_TAG])
     w.writerow(["shunt_ohms",  f"{SHUNT_OHMS:.4f}"])
     w.writerow([])
     w.writerow(["# DATA"])
     w.writerow(["type", "timestamp_or_event", "value_or_time", "boot_number"])
     w.writerow([])
+
+    unplug_time = datetime.now().isoformat(timespec="milliseconds")
+    w.writerow(["EVENT", "unplug", unplug_time, boot_number])
     csv_file.flush()
+    print(f"  [Unplug marked at {unplug_time}]")
+    print(f"  Replug Pico now. Watch for esp32_test WiFi or current flatlining.")
+    print(f"  Press ENTER once fully settled.")
+
+    drain_enter()
+
+    samples = 0
+    while True:
+        try:
+            raw = meter.query("READ?").strip()
+            ts  = datetime.now().isoformat(timespec="milliseconds")
+            w.writerow(["METER", ts, raw, boot_number])
+            samples += 1
+        except Exception as e:
+            print(f"  [Meter] Read error: {e}")
+            time.sleep(0.1)
+
+        if enter_pressed():
+            sys.stdin.readline()
+            break
+
+    settled_time = datetime.now().isoformat(timespec="milliseconds")
+    w.writerow(["EVENT", "settled", settled_time, boot_number])
+    csv_file.flush()
+    csv_file.close()
+
+    print(f"  [✓] Boot settled at {settled_time} — {samples} samples recorded.")
+    print(f"  [✓] Saved to {filename}")
+
+if __name__ == "__main__":
+    meter = connect_meter()
 
     print(f"\nBoot measurement: {MODULE}")
     print(f"Boots           : {TOTAL_BOOTS}")
     print(f"Session         : {SESSION_TAG}")
-    print(f"Output          : {filename}")
+    print(f"Output dir      : {OUT_DIR}")
     print(f"\nWorkflow per boot:")
-    print(f"  1. Meter records continuously the whole time")
-    print(f"  2. Unplug Pico, press ENTER to mark unplug")
-    print(f"  3. Replug Pico immediately after")
-    print(f"  4. Watch current settle — wait until esp32_test appears or current flatlines")
-    print(f"  5. Press ENTER to mark settled, then repeat")
+    print(f"  1. Unplug Pico, press ENTER to mark unplug")
+    print(f"  2. Replug Pico immediately after")
+    print(f"  3. Watch current settle — wait until esp32_test appears or current flatlines")
+    print(f"  4. Press ENTER to mark settled — file saves immediately")
+    print(f"  5. Repeat (each boot is its own file)")
     input("\nPress ENTER to begin → ")
 
     for boot in range(1, TOTAL_BOOTS + 1):
-        record_boot(meter, boot, w, csv_file)
+        record_boot(meter, boot)
         print(f"[✓] Boot {boot}/{TOTAL_BOOTS} complete.\n")
         if boot < TOTAL_BOOTS:
             time.sleep(1)
 
-    csv_file.close()
-    print(f"\nAll {TOTAL_BOOTS} boots recorded → {filename}")
+    print(f"\nAll {TOTAL_BOOTS} boots recorded → {OUT_DIR}")
