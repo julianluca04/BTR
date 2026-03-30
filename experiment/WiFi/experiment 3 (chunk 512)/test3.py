@@ -10,14 +10,17 @@ from datetime import datetime, timedelta
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 MODULE        = "esp32"
-STRATEGY      = "byte_by_byte"   # change to "chunked_512" or "full_payload" per run
+STRATEGY      = "chunked_512"    # chunked_512 | chunked_1024 | byte_by_byte | full_payload
 TOTAL_RUNS    = 30
 PAYLOAD_SIZES = [
     1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
     1024, 2048, 4096, 8192, 16384, 32768, 65536,
     131072, 262144, 524288
-    # 1048576 removed — heap fragmentation on ESP32-C3 above ~130KB across repeated runs
 ]
+
+# A run is only accepted if it reaches at least this payload size successfully.
+# Runs that fail before this threshold are discarded and retried automatically.
+MIN_VALID_PAYLOAD = 131072
 
 PICO_PORT      = "/dev/tty.usbmodem21101"
 PICO_BAUD      = 115200
@@ -28,9 +31,9 @@ IDLE_S         = 1.0
 BASELINE_S     = 5.0
 METER_WARMUP_S = 2.0
 TCP_ACCEPT_TIMEOUT  = 30
-TCP_RECEIVE_TIMEOUT = 120
+TCP_RECEIVE_TIMEOUT = 300
 
-SHUNT_OHMS = 1.0
+SHUNT_OHMS = 1.1
 V_SUPPLY   = 3.3
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +41,7 @@ SESSION_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUT_DIR     = os.path.join(SCRIPT_DIR, "data", MODULE, STRATEGY, SESSION_TAG)
 os.makedirs(OUT_DIR, exist_ok=True)
 # ──────────────────────────────────────────────────────────────────────────────
+
 def check_wifi():
     airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
     while True:
@@ -80,7 +84,6 @@ def connect_meter():
         raise RuntimeError("[Meter] Could not connect after retries.")
 
     meter = reopen_meter()
-
     meter.write("CONF:VOLT:DC")
     meter.write("SENS:VOLT:DC:RANG:AUTO ON")
     meter.write("SENS:VOLT:DC:NPLC 0.02")
@@ -93,8 +96,6 @@ def connect_meter():
     except Exception:
         pass
 
-    print("[Meter] Configured for maximum sample rate (DC voltage).")
-
     print("[Meter] Warming up...")
     deadline = time.time() + METER_WARMUP_S
     count = 0
@@ -105,7 +106,6 @@ def connect_meter():
         except Exception:
             pass
     print(f"[Meter] Warmup complete ({count} dummy reads in {METER_WARMUP_S}s).")
-
     return meter
 
 
@@ -137,7 +137,6 @@ def meter_stream(meter, rows, stop_event, flush_callback):
 def recv_exact(conn, expected_size, total_timeout=TCP_RECEIVE_TIMEOUT):
     buf = b""
     deadline = time.time() + total_timeout
-    # Scale recv buffer: larger payloads benefit from bigger reads
     recv_buf = min(65536, max(4096, expected_size // 16))
     conn.settimeout(1.0)
     try:
@@ -148,7 +147,6 @@ def recv_exact(conn, expected_size, total_timeout=TCP_RECEIVE_TIMEOUT):
             try:
                 chunk = conn.recv(min(recv_buf, expected_size - len(buf)))
                 if not chunk:
-                    # Connection closed by remote — stop immediately
                     if len(buf) < expected_size:
                         print(f"  [!] Connection closed early: {len(buf)}/{expected_size}B")
                     break
@@ -200,14 +198,21 @@ def wait_for_pico(pico, expected, timeout=20):
             time.sleep(0.05)
     return False
 
-def run_experiment(run_number, meter, pico):
+def run_experiment(run_number, attempt_number, meter, pico):
+    """
+    Returns True if the run is valid (reached MIN_VALID_PAYLOAD).
+    Returns False if it failed before MIN_VALID_PAYLOAD and should be retried.
+    """
     filename = os.path.join(
         OUT_DIR, f"{MODULE}_{STRATEGY}_run{run_number:02d}.csv"
     )
-    meter_rows = []
-    event_rows = []
-    stop_meter = threading.Event()
+    meter_rows  = []
+    event_rows  = []
+    stop_meter  = threading.Event()
     set_phase("idle")
+
+    # Track the highest payload successfully completed this run
+    highest_completed = 0
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -216,11 +221,13 @@ def run_experiment(run_number, meter, pico):
     server.settimeout(TCP_ACCEPT_TIMEOUT)
 
     try:
-        print(f"\n[Run {run_number:02d}/{TOTAL_RUNS}] Waiting for Pico READY...")
+        attempt_tag = f" (attempt {attempt_number})" if attempt_number > 1 else ""
+        print(f"\n[Run {run_number:02d}/{TOTAL_RUNS}]{attempt_tag} Waiting for Pico READY...")
         if not wait_for_pico(pico, "READY", timeout=60):
             print("[!] Pico did not send READY — skipping run.")
-            return
+            return False
 
+        # Open file — overwrites previous attempt for this run number
         csv_file = open(filename, "w", newline="")
         w = csv.writer(csv_file)
 
@@ -228,6 +235,7 @@ def run_experiment(run_number, meter, pico):
         w.writerow(["module",      MODULE])
         w.writerow(["strategy",    STRATEGY])
         w.writerow(["run",         run_number])
+        w.writerow(["attempt",     attempt_number])
         w.writerow(["session",     SESSION_TAG])
         w.writerow(["baseline_s",  BASELINE_S])
         w.writerow(["shunt_ohms",  f"{SHUNT_OHMS:.6f}"])
@@ -246,7 +254,7 @@ def run_experiment(run_number, meter, pico):
             w.writerow([entry["timestamp"], entry["value"], entry["phase"]])
             csv_file.flush()
 
-        print(f"[Run {run_number:02d}] Recording {BASELINE_S}s baseline before start...")
+        print(f"[Run {run_number:02d}] Recording {BASELINE_S}s baseline...")
         set_phase("baseline")
         m_thread = threading.Thread(
             target=meter_stream,
@@ -282,7 +290,7 @@ def run_experiment(run_number, meter, pico):
             stop_meter.set()
             m_thread.join(timeout=3)
             csv_file.close()
-            return
+            return False
 
         w.writerow(["estimated_start", estimated_start.isoformat()])
         w.writerow(["start_delay_ms",  delay_ms])
@@ -315,6 +323,7 @@ def run_experiment(run_number, meter, pico):
 
                 if verified:
                     print(f"  [✓] {len(payload)}B verified at {rx_end}")
+                    highest_completed = payload_size
                 else:
                     print(f"  [✗] {len(payload)}B FAILED at {rx_end}")
 
@@ -384,6 +393,11 @@ def run_experiment(run_number, meter, pico):
 
         print(f"[Run {run_number:02d}] → {filename}  "
               f"({len(meter_rows)} meter samples, {len(event_rows)} events)")
+        print(f"[Run {run_number:02d}] Highest completed payload: {highest_completed}B "
+              f"(threshold: {MIN_VALID_PAYLOAD}B)")
+
+        # Run is valid only if it reached the minimum threshold
+        return highest_completed >= MIN_VALID_PAYLOAD
 
     finally:
         server.close()
@@ -411,15 +425,31 @@ if __name__ == "__main__":
     print(f"\nExperiment : {MODULE} | {STRATEGY}")
     print(f"Runs       : {TOTAL_RUNS}")
     print(f"Payloads   : {PAYLOAD_SIZES}")
+    print(f"Min valid  : {MIN_VALID_PAYLOAD}B — runs failing before this are retried")
     print(f"Session    : {SESSION_TAG}")
     print(f"Output     : {OUT_DIR}")
     input("\nPress ENTER to begin → ")
 
-    for run in range(1, TOTAL_RUNS + 1):
-        run_experiment(run, meter, pico)
-        print(f"[✓] Run {run}/{TOTAL_RUNS} complete.\n")
-        if run < TOTAL_RUNS:
+    completed_runs = 0
+    run_number     = 1
+
+    while completed_runs < TOTAL_RUNS:
+        attempt = 1
+        while True:
+            valid = run_experiment(run_number, attempt, meter, pico)
+            if valid:
+                print(f"[✓] Run {run_number} accepted ({completed_runs + 1}/{TOTAL_RUNS}).\n")
+                completed_runs += 1
+                run_number += 1
+                break
+            else:
+                print(f"[✗] Run {run_number} failed before {MIN_VALID_PAYLOAD}B "
+                      f"— retrying (attempt {attempt + 1})...")
+                attempt += 1
+                time.sleep(5)
+
+        if completed_runs < TOTAL_RUNS:
             time.sleep(3)
 
     pico.close()
-    print("All runs complete.")
+    print(f"All {TOTAL_RUNS} valid runs complete.")

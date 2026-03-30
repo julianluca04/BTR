@@ -10,7 +10,10 @@ const char* AP_PASS = "esp32test";
 const char* MAC_IP  = "192.168.4.2";
 const int   MAC_PORT = 8080;
 
-const int CHUNK_SIZE = 512;
+const int CHUNK_SIZE  = 512;
+const int FLOW_WINDOW = 64;  // RDY pacing — must match Pico's FLOW_WINDOW
+
+static uint8_t chunkBuf[CHUNK_SIZE];
 
 void setup() {
   Serial.begin(115200);
@@ -77,9 +80,9 @@ void loop() {
 
   client.print("SIZE:" + String(payloadSize) + "\n");
 
-  long    forwarded  = 0;
-  int     chunkCount = 0;
-  uint8_t chunkBuf[CHUNK_SIZE];
+  long forwarded  = 0;
+  int  chunkCount = 0;
+  long flowCount  = 0;
   unsigned long lastByte = millis();
 
   while (forwarded < payloadSize) {
@@ -87,15 +90,21 @@ void loop() {
       chunkBuf[chunkCount] = picoSerial.read();
       chunkCount++;
       forwarded++;
+      flowCount++;
       lastByte = millis();
 
+      // Flush chunk to TCP when full or payload complete
       if (chunkCount >= CHUNK_SIZE || forwarded == payloadSize) {
         client.write(chunkBuf, chunkCount);
-        if (forwarded < payloadSize) {
-          picoSerial.println("RDY");
-        }
         chunkCount = 0;
       }
+
+      // Send RDY every FLOW_WINDOW bytes for Pico flow control
+      if (flowCount >= FLOW_WINDOW && forwarded < payloadSize) {
+        picoSerial.println("RDY");
+        flowCount = 0;
+      }
+
     } else if (millis() - lastByte > 10000) {
       Serial.println("[ESP32] Timeout waiting for bytes.");
       break;
