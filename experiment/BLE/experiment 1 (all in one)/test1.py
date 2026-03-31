@@ -7,8 +7,8 @@ Dependencies:
 
 Nordic UART Service (NUS) UUIDs:
     Service : 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
-    TX char : 6E400003-B5A3-F393-E0A9-E50E24DCCA9E  (nRF notifies → Mac reads)
-    RX char : 6E400002-B5A3-F393-E0A9-E50E24DCCA9E  (Mac writes  → nRF)
+    TX char : 6E400003-B5A3-F393-E0A9-E50E24DCCA9E  (nRF notifies -> Mac reads)
+    RX char : 6E400002-B5A3-F393-E0A9-E50E24DCCA9E  (Mac writes  -> nRF)
 """
 
 import asyncio
@@ -19,9 +19,9 @@ import serial
 import threading
 import time
 from datetime import datetime, timedelta
-from bleak import BleakScanner, BleakClient
+from bleak import BleakClient
 
-# ─── CONFIG ───────────────────────────────────────────────────────────────────
+# --- CONFIG -------------------------------------------------------------------
 MODULE        = "nrf52840"
 STRATEGY      = "full_payload"
 TOTAL_RUNS    = 30
@@ -31,19 +31,18 @@ PAYLOAD_SIZES = [
     131072
 ]
 
-# Run is accepted only if it reaches at least this payload size successfully.
 MIN_VALID_PAYLOAD = 131072
 
 PICO_PORT  = "/dev/tty.usbmodem21101"   # update to match your Pico port
 PICO_BAUD  = 115200
 
-BLE_DEVICE_NAME   = "NRF-BLE-FULL"      # must match Bluefruit.setName() in firmware
-BLE_SCAN_TIMEOUT  = 30                  # seconds to scan for device
-BLE_RECV_TIMEOUT  = 300                 # seconds to receive one full payload over BLE
+# Address found via plug/unplug scan test — connect directly, skip scanning
+BLE_DEVICE_ADDRESS  = "1385E324-4660-24ED-9B2E-A55F8DF154AE"
+BLE_RECV_TIMEOUT    = 300              # seconds to receive one full payload over BLE
+BLE_RECONNECT_DELAY = 3.0              # seconds to wait before reconnecting
 
-NUS_SERVICE_UUID  = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
-NUS_TX_CHAR_UUID  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # nRF → Mac (notify)
-NUS_RX_CHAR_UUID  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # Mac → nRF (write)
+NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # nRF -> Mac (notify)
+NUS_RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # Mac -> nRF (write)
 
 IDLE_S         = 1.0
 BASELINE_S     = 5.0
@@ -56,10 +55,10 @@ SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 SESSION_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUT_DIR     = os.path.join(SCRIPT_DIR, "data", MODULE, STRATEGY, SESSION_TAG)
 os.makedirs(OUT_DIR, exist_ok=True)
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 
-# ─── METER ────────────────────────────────────────────────────────────────────
+# --- METER --------------------------------------------------------------------
 def connect_meter():
     rm = pyvisa.ResourceManager('@py')
 
@@ -133,7 +132,7 @@ def meter_stream(meter, rows, stop_event, flush_callback):
             time.sleep(0.2)
 
 
-# ─── PICO HELPERS ─────────────────────────────────────────────────────────────
+# --- PICO HELPERS -------------------------------------------------------------
 def wait_for_pico(pico, expected, timeout=20):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -148,90 +147,122 @@ def wait_for_pico(pico, expected, timeout=20):
     return False
 
 
-# ─── BLE RECEIVER ─────────────────────────────────────────────────────────────
+# --- BLE RECEIVER -------------------------------------------------------------
 class BLEReceiver:
     """
-    Manages a persistent BLE connection to the nRF52840 across all payload
-    sizes within a single run.  Call receive_payload() once per payload size.
+    Connects directly to the nRF52840 by address — no scan needed.
+    Automatically reconnects if the connection drops between runs.
 
     Protocol from nRF:
-        "SIZE:<n>\\n"   — header (arrives as one or more notifications)
-        <n bytes>       — raw payload data (arrives in MTU-sized notifications)
+        "SIZE:<n>\n"   -- header
+        <n bytes>      -- raw payload data in MTU-sized notifications
     """
 
     def __init__(self):
-        self._client: BleakClient | None = None
-        self._address: str | None = None
+        self._client = None
         self._buf = bytearray()
         self._lock = threading.Lock()
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
+        self._loop = None
+        self._thread = None
+        self._connected = False
 
-    # ── async internals ──────────────────────────────────────────────────────
+    # -- async internals -------------------------------------------------------
 
-    async def _scan_and_connect(self):
-        print(f"[BLE] Scanning for '{BLE_DEVICE_NAME}' (up to {BLE_SCAN_TIMEOUT}s)...")
-        device = await BleakScanner.find_device_by_name(
-            BLE_DEVICE_NAME, timeout=BLE_SCAN_TIMEOUT
+    async def _connect_async(self):
+        print(f"[BLE] Connecting to {BLE_DEVICE_ADDRESS}...")
+        self._client = BleakClient(
+            BLE_DEVICE_ADDRESS,
+            disconnected_callback=self._on_disconnected
         )
-        if device is None:
-            raise RuntimeError(f"[BLE] Device '{BLE_DEVICE_NAME}' not found.")
-
-        self._address = device.address
-        print(f"[BLE] Found {BLE_DEVICE_NAME} @ {self._address}")
-
-        self._client = BleakClient(self._address)
         await self._client.connect()
+        self._connected = True
         print("[BLE] Connected.")
-
         await self._client.start_notify(NUS_TX_CHAR_UUID, self._on_notify)
-        print("[BLE] Notifications enabled on TX characteristic.")
+        print("[BLE] Notifications enabled.")
+
+    async def _disconnect_async(self):
+        if self._client and self._client.is_connected:
+            await self._client.disconnect()
+        self._connected = False
+        print("[BLE] Disconnected.")
 
     def _on_notify(self, sender, data: bytearray):
         with self._lock:
             self._buf.extend(data)
 
-    async def _disconnect(self):
-        if self._client and self._client.is_connected:
-            await self._client.disconnect()
-            print("[BLE] Disconnected.")
+    def _on_disconnected(self, client):
+        self._connected = False
+        print("[BLE] Connection dropped by device.")
 
-    # ── public sync API (called from main thread) ────────────────────────────
+    # -- public sync API -------------------------------------------------------
 
     def connect(self):
-        """Scan for nRF, connect, enable notifications.  Blocks until done."""
+        """Connect to nRF by address. Blocks until done."""
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
+        future = asyncio.run_coroutine_threadsafe(self._connect_async(), self._loop)
+        future.result(timeout=30)
 
-        future = asyncio.run_coroutine_threadsafe(self._scan_and_connect(), self._loop)
-        future.result(timeout=BLE_SCAN_TIMEOUT + 10)
+    def reconnect(self, retries=5):
+        """
+        Disconnect cleanly then reconnect.
+        Called between runs to reset BLE stack state on both sides.
+        """
+        if self._client:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._disconnect_async(), self._loop
+                )
+                future.result(timeout=10)
+            except Exception:
+                pass
+
+        time.sleep(BLE_RECONNECT_DELAY)
+
+        for attempt in range(1, retries + 1):
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._connect_async(), self._loop
+                )
+                future.result(timeout=30)
+                print(f"[BLE] Reconnect successful (attempt {attempt}).")
+                return
+            except Exception as e:
+                print(f"[BLE] Reconnect attempt {attempt}/{retries} failed: {e}")
+                time.sleep(BLE_RECONNECT_DELAY)
+
+        raise RuntimeError("[BLE] Could not reconnect after retries.")
 
     def disconnect(self):
         if self._loop:
-            future = asyncio.run_coroutine_threadsafe(self._disconnect(), self._loop)
+            future = asyncio.run_coroutine_threadsafe(
+                self._disconnect_async(), self._loop
+            )
             try:
                 future.result(timeout=10)
             except Exception:
                 pass
             self._loop.call_soon_threadsafe(self._loop.stop)
 
+    def is_connected(self):
+        return self._connected and self._client is not None and self._client.is_connected
+
     def clear_buffer(self):
         with self._lock:
             self._buf.clear()
 
-    def receive_payload(self, expected_size: int, timeout: float = BLE_RECV_TIMEOUT):
+    def receive_payload(self, expected_size, timeout=BLE_RECV_TIMEOUT):
         """
         Waits for the nRF to deliver:
-            "SIZE:<n>\\n" header  +  <n> data bytes
+            "SIZE:<n>\n" header  +  <n> data bytes
         Returns (declared_size, received_bytes, rx_end_timestamp) or
                 (0, b'', 'FAILED') on timeout/mismatch.
         """
         self.clear_buffer()
-
         deadline = time.time() + timeout
 
-        # --- Phase 1: read header "SIZE:<n>\n" ---
+        # Phase 1: read header "SIZE:<n>\n"
         declared_size = None
         while time.time() < deadline:
             with self._lock:
@@ -240,7 +271,7 @@ class BLEReceiver:
             if nl != -1:
                 header = data[:nl].decode(errors='replace').strip()
                 with self._lock:
-                    del self._buf[:nl + 1]  # consume header + '\n'
+                    del self._buf[:nl + 1]
                 if header.startswith("SIZE:"):
                     try:
                         declared_size = int(header[5:])
@@ -253,7 +284,7 @@ class BLEReceiver:
             print(f"  [!] BLE: header timeout for {expected_size}B")
             return 0, b'', 'FAILED'
 
-        # --- Phase 2: accumulate exactly declared_size bytes ---
+        # Phase 2: accumulate exactly declared_size bytes
         while time.time() < deadline:
             with self._lock:
                 got = len(self._buf)
@@ -270,8 +301,8 @@ class BLEReceiver:
         return declared_size, payload, rx_end
 
 
-# ─── PAYLOAD VERIFICATION ─────────────────────────────────────────────────────
-def verify_payload(payload: bytes, payload_size: int, index: int) -> bool:
+# --- PAYLOAD VERIFICATION -----------------------------------------------------
+def verify_payload(payload, payload_size, index):
     expected_byte = ord('0') + (index % 10)
     if len(payload) != payload_size:
         print(f"  [!] Size mismatch: expected {payload_size}B got {len(payload)}B")
@@ -284,12 +315,8 @@ def verify_payload(payload: bytes, payload_size: int, index: int) -> bool:
     return True
 
 
-# ─── EXPERIMENT ───────────────────────────────────────────────────────────────
-def run_experiment(run_number, attempt_number, meter, pico, ble: BLEReceiver):
-    """
-    Returns True  — run valid (reached MIN_VALID_PAYLOAD).
-    Returns False — run failed before MIN_VALID_PAYLOAD; retry.
-    """
+# --- EXPERIMENT ---------------------------------------------------------------
+def run_experiment(run_number, attempt_number, meter, pico, ble):
     filename = os.path.join(
         OUT_DIR, f"{MODULE}_{STRATEGY}_run{run_number:02d}.csv"
     )
@@ -304,8 +331,13 @@ def run_experiment(run_number, attempt_number, meter, pico, ble: BLEReceiver):
         attempt_tag = f" (attempt {attempt_number})" if attempt_number > 1 else ""
         print(f"\n[Run {run_number:02d}/{TOTAL_RUNS}]{attempt_tag} Waiting for Pico READY...")
         if not wait_for_pico(pico, "READY", timeout=60):
-            print("[!] Pico did not send READY — skipping run.")
+            print("[!] Pico did not send READY -- skipping run.")
             return False
+
+        # Ensure BLE is connected before starting
+        if not ble.is_connected():
+            print("[BLE] Not connected -- reconnecting before run...")
+            ble.reconnect()
 
         csv_file = open(filename, "w", newline="")
         w = csv.writer(csv_file)
@@ -365,7 +397,7 @@ def run_experiment(run_number, attempt_number, meter, pico, ble: BLEReceiver):
                 time.sleep(0.05)
 
         if estimated_start is None:
-            print("[!] No START_IN — aborting run.")
+            print("[!] No START_IN -- aborting run.")
             pico.write(b"SKIP\n")
             stop_meter.set()
             m_thread.join(timeout=3)
@@ -387,7 +419,7 @@ def run_experiment(run_number, attempt_number, meter, pico, ble: BLEReceiver):
 
             tx_start    = datetime.now().isoformat(timespec="milliseconds")
             skip_reason = ""
-            print(f"  [→] {i+1}/{len(PAYLOAD_SIZES)} Waiting for {payload_size}B over BLE...")
+            print(f"  [->] {i+1}/{len(PAYLOAD_SIZES)} Waiting for {payload_size}B over BLE...")
             set_phase(f"tx_{payload_size}")
 
             declared, payload, rx_end = ble.receive_payload(
@@ -396,7 +428,6 @@ def run_experiment(run_number, attempt_number, meter, pico, ble: BLEReceiver):
             )
 
             if rx_end == 'FAILED' or declared == 0:
-                # Check if Pico reported NRF_FAIL on serial
                 nrf_fail = False
                 dl2 = time.time() + 2
                 while time.time() < dl2:
@@ -413,7 +444,7 @@ def run_experiment(run_number, attempt_number, meter, pico, ble: BLEReceiver):
                 if not nrf_fail:
                     skip_reason = "ble_timeout"
 
-                print(f"  [!] {payload_size}B failed ({skip_reason}) — skipping remaining.")
+                print(f"  [!] {payload_size}B failed ({skip_reason}) -- skipping remaining.")
                 event_rows.append({
                     "payload_size":   payload_size,
                     "declared_size":  payload_size,
@@ -434,10 +465,10 @@ def run_experiment(run_number, attempt_number, meter, pico, ble: BLEReceiver):
                 complete = len(payload) == declared
 
                 if verified:
-                    print(f"  [✓] {len(payload)}B verified at {rx_end}")
+                    print(f"  [+] {len(payload)}B verified at {rx_end}")
                     highest_completed = payload_size
                 else:
-                    print(f"  [✗] {len(payload)}B FAILED at {rx_end}")
+                    print(f"  [x] {len(payload)}B FAILED at {rx_end}")
 
                 event_rows.append({
                     "payload_size":   payload_size,
@@ -470,7 +501,7 @@ def run_experiment(run_number, attempt_number, meter, pico, ble: BLEReceiver):
         m_thread.join(timeout=3)
         csv_file.close()
 
-        print(f"[Run {run_number:02d}] → {filename}  "
+        print(f"[Run {run_number:02d}] -> {filename}  "
               f"({len(meter_rows)} meter samples, {len(event_rows)} events)")
         print(f"[Run {run_number:02d}] Highest completed: {highest_completed}B "
               f"(threshold: {MIN_VALID_PAYLOAD}B)")
@@ -483,7 +514,7 @@ def run_experiment(run_number, attempt_number, meter, pico, ble: BLEReceiver):
         return False
 
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# --- MAIN ---------------------------------------------------------------------
 if __name__ == "__main__":
     meter = connect_meter()
 
@@ -493,7 +524,7 @@ if __name__ == "__main__":
         pico = serial.Serial(PICO_PORT, PICO_BAUD, timeout=15)
     except serial.SerialException as e:
         if "Resource busy" in str(e):
-            print("\n[!] Port busy — close Arduino IDE and retry.")
+            print("\n[!] Port busy -- close Arduino IDE and retry.")
         else:
             print(f"\n[!] Could not open Pico port: {e}")
         exit(1)
@@ -501,19 +532,19 @@ if __name__ == "__main__":
     time.sleep(2)
     pico.reset_input_buffer()
 
-    # Connect BLE once — stays connected across all runs
+    # Connect BLE directly by address -- reconnects automatically between runs
     ble = BLEReceiver()
-    print("\n[BLE] Connecting to nRF52840...")
+    print(f"\n[BLE] Connecting to nRF52840 @ {BLE_DEVICE_ADDRESS}...")
     print("      Ensure nRF is powered and advertising.")
     ble.connect()
 
     print(f"\nExperiment : {MODULE} | {STRATEGY}")
     print(f"Runs       : {TOTAL_RUNS}")
     print(f"Payloads   : {PAYLOAD_SIZES}")
-    print(f"Min valid  : {MIN_VALID_PAYLOAD}B — runs failing before this are retried")
+    print(f"Min valid  : {MIN_VALID_PAYLOAD}B -- runs failing before this are retried")
     print(f"Session    : {SESSION_TAG}")
     print(f"Output     : {OUT_DIR}")
-    input("\nPress ENTER to begin → ")
+    input("\nPress ENTER to begin -> ")
 
     completed_runs = 0
     run_number     = 1
@@ -524,17 +555,20 @@ if __name__ == "__main__":
             while True:
                 valid = run_experiment(run_number, attempt, meter, pico, ble)
                 if valid:
-                    print(f"[✓] Run {run_number} accepted ({completed_runs + 1}/{TOTAL_RUNS}).\n")
+                    print(f"[+] Run {run_number} accepted ({completed_runs + 1}/{TOTAL_RUNS}).\n")
                     completed_runs += 1
                     run_number += 1
                     break
                 else:
-                    print(f"[✗] Run {run_number} failed before {MIN_VALID_PAYLOAD}B "
-                          f"— retrying (attempt {attempt + 1})...")
+                    print(f"[x] Run {run_number} failed before {MIN_VALID_PAYLOAD}B "
+                          f"-- retrying (attempt {attempt + 1})...")
                     attempt += 1
                     time.sleep(5)
 
             if completed_runs < TOTAL_RUNS:
+                # Cycle BLE connection between runs to reset stack state on both sides
+                print("[BLE] Cycling connection between runs...")
+                ble.reconnect()
                 time.sleep(3)
 
     finally:
