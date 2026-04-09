@@ -1,4 +1,0 @@
-Timestamp : 2026-03-24 16:20:55
-From      : 192.168.4.1
-Size      : 8 bytes
-Message   : 11111111
