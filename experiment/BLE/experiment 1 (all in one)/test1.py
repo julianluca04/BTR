@@ -44,6 +44,7 @@ BLE_RECONNECT_DELAY = 3.0              # seconds to wait before reconnecting
 NUS_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # nRF -> Mac (notify)
 NUS_RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # Mac -> nRF (write)
 
+
 IDLE_S         = 1.0
 BASELINE_S     = 5.0
 METER_WARMUP_S = 2.0

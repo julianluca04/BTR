@@ -62,7 +62,9 @@ void setup() {
 
 void loop() {
   if (!started) {
-    Serial.println("READY");
+    if (!started) {
+  Serial.println("READY");
+}
     unsigned long t = millis();
     while (millis() - t < 500) {
       if (Serial.available()) {
@@ -90,7 +92,7 @@ void loop() {
 
     // Tell nRF the size
     Serial1.println(size);
-    delay(50);
+    delay(200);
 
     // Send payload bytes in 256-byte chunks
     int sent = 0;
