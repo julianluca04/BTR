@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import threading
 import time
-from datetime import datetime
 from bleak import BleakClient
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
@@ -25,9 +24,97 @@ NRF_FQBN        = 'Seeeduino:nrf52:xiaonRF52840Sense'
 NRF_PORT        = '/dev/cu.usbmodem11101'
 SAFE_BUILD_BASE = '/tmp/ble_upload_tmp'
 
-PICO_SKETCH_SRC = '/Users/foml/coding/MSP/year_3/BTR/experiments/BLE/experiment 1 (all in one)/Pico_1'
-PICO_FQBN       = 'arduino:mbed_rp2040:pico'
+BLE_TIMEOUT_S = 120
+IDLE_S        = 1.0
 # ─────────────────────────────────────────────────────────────────────────────
+
+# MicroPython code for Pico — uses UART0 (GP0=TX, GP1=RX) confirmed working
+PICO_CODE = """
+import machine
+import time
+
+led  = machine.Pin(25, machine.Pin.OUT)
+uart = machine.UART(0, baudrate=115200, tx=machine.Pin(0), rx=machine.Pin(1))
+usb  = machine.UART(0, baudrate=115200)
+
+PAYLOAD_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
+                 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+SETTLE_MS      = 1000
+START_DELAY_MS = 500
+
+def flash(n):
+    for _ in range(n):
+        led.value(1); time.sleep_ms(80)
+        led.value(0); time.sleep_ms(80)
+
+def usb_println(s):
+    print(s)
+
+def usb_readline(timeout_ms=15000):
+    buf = b''
+    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        import sys
+        import select
+        if select.select([sys.stdin], [], [], 0.01)[0]:
+            c = sys.stdin.read(1)
+            if c == '\\n':
+                return buf.decode('utf-8', 'replace').strip()
+            buf += c.encode()
+    return ''
+
+usb_println('READY')
+
+while True:
+    led.value(1); time.sleep_ms(100)
+    led.value(0); time.sleep_ms(900)
+    
+    import sys, select
+    if select.select([sys.stdin], [], [], 0)[0]:
+        cmd = sys.stdin.readline().strip()
+        if cmd == 'go':
+            usb_println('START_IN_' + str(START_DELAY_MS))
+            time.sleep_ms(START_DELAY_MS)
+            
+            skip = False
+            for i, size in enumerate(PAYLOAD_SIZES):
+                if skip:
+                    break
+                digit = ord('0') + (i % 10)
+                
+                uart.write((str(size) + '\\n').encode())
+                time.sleep_ms(50)
+                
+                flash(1)
+                sent = 0
+                while sent < size:
+                    chunk = min(256, size - sent)
+                    uart.write(bytes([digit] * chunk))
+                    sent += chunk
+                    time.sleep_ms(10)
+                flash(2)
+                
+                usb_println('SENT ' + str(size) + 'B')
+                
+                deadline = time.ticks_add(time.ticks_ms(), 15000)
+                got = ''
+                while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+                    if select.select([sys.stdin], [], [], 0.01)[0]:
+                        got = sys.stdin.readline().strip()
+                        break
+                
+                if got == 'ACK':
+                    pass
+                else:
+                    skip = True
+                
+                if not skip:
+                    time.sleep_ms(SETTLE_MS)
+            
+            flash(3)
+            usb_println('DONE')
+            usb_println('READY')
+"""
 
 
 def run_cmd(cmd, check=True):
@@ -44,48 +131,79 @@ def upload_nrf():
     if " " in sketch or "(" in sketch or ")" in sketch:
         name = os.path.basename(os.path.normpath(sketch))
         safe = os.path.join(SAFE_BUILD_BASE, name)
-        if os.path.exists(safe): shutil.rmtree(safe)
+        if os.path.exists(safe):
+            shutil.rmtree(safe)
         shutil.copytree(sketch, safe)
         sketch = safe
+        print(f"[→] Copied to: {sketch}")
     run_cmd(["arduino-cli", "compile", "--fqbn", NRF_FQBN, sketch])
     rc = run_cmd(["arduino-cli", "upload", "-p", NRF_PORT, "-b", NRF_FQBN, sketch], check=False)
     if rc != 0:
-        print("[!] Upload failed — double-tap reset, press ENTER")
+        print("[!] Upload failed — double-tap reset on nRF, wait for LED pulse, press ENTER")
         input("    → ")
         time.sleep(1)
         run_cmd(["arduino-cli", "upload", "-p", NRF_PORT, "-b", NRF_FQBN, sketch])
-    print("[✓] nRF uploaded. Waiting 5s...")
+    print("[✓] nRF uploaded. Waiting 5s to boot...")
     time.sleep(5)
 
 
-def upload_pico():
-    print("\n[→] Uploading Pico sketch...")
-    sketch = PICO_SKETCH_SRC
-    if " " in sketch or "(" in sketch or ")" in sketch:
-        name = os.path.basename(os.path.normpath(sketch))
-        safe = os.path.join(SAFE_BUILD_BASE, name)
-        if os.path.exists(safe): shutil.rmtree(safe)
-        shutil.copytree(sketch, safe)
-        sketch = safe
-    run_cmd(["arduino-cli", "compile", "--fqbn", PICO_FQBN, sketch])
-    rc = run_cmd(["arduino-cli", "upload", "-p", PICO_PORT.replace("tty.", "cu."),
-                  "-b", PICO_FQBN, sketch], check=False)
-    if rc != 0:
-        print("[!] Pico upload failed, press ENTER to retry")
-        input("    → ")
-        run_cmd(["arduino-cli", "upload", "-p", PICO_PORT.replace("tty.", "cu."),
-                 "-b", PICO_FQBN, sketch])
-    print("[✓] Pico uploaded. Waiting 3s...")
-    time.sleep(3)
+def flash_pico():
+    print("\n[→] Flashing Pico via MicroPython raw REPL...")
+
+    with serial.Serial(PICO_PORT, PICO_BAUD, timeout=2) as ser:
+        for _ in range(20):
+            ser.write(b'\x03')
+            time.sleep(0.05)
+        time.sleep(0.5)
+        ser.reset_input_buffer()
+        ser.write(b'\x01')
+        time.sleep(0.5)
+        response = ser.read(ser.in_waiting)
+        print(f"[REPL] {response}")
+
+        if b'raw REPL' not in response:
+            ser.write(b'\x04')
+            time.sleep(2)
+            ser.write(b'\x01')
+            time.sleep(0.5)
+            response = ser.read(ser.in_waiting)
+            print(f"[REPL2] {response}")
+
+        if b'raw REPL' not in response:
+            raise RuntimeError("Could not enter raw REPL")
+
+        cmd = b"f=open('main.py','w');f.write(" + repr(PICO_CODE).encode() + b");f.close()\x04"
+        ser.write(cmd)
+        time.sleep(3)
+        response = ser.read(ser.in_waiting)
+        print(f"[Write] {response}")
+
+        ser.write(b'\x04')
+        time.sleep(2)
+        print("[✓] Pico flashed and restarted.")
 
 
-def wait_for_pico(pico, expected, timeout=20):
+def open_pico_serial(port, baud, retries=10, delay=2.0):
+    for attempt in range(retries):
+        try:
+            s = serial.Serial(port, baud, timeout=15)
+            print(f"[✓] Pico serial opened on {port}")
+            return s
+        except serial.SerialException as e:
+            print(f"[!] Attempt {attempt+1}/{retries} failed: {e}")
+            time.sleep(delay)
+    raise RuntimeError(f"Could not open Pico port {port} after {retries} attempts.")
+
+
+def wait_for_pico(pico, expected, timeout=30):
     deadline = time.time() + timeout
     while time.time() < deadline:
         if pico.in_waiting:
             line = pico.readline().decode(errors='replace').strip()
-            if line: print(f"[Pico] {line}")
-            if line == expected: return True
+            if line:
+                print(f"[Pico] {line}")
+            if line == expected:
+                return True
         else:
             time.sleep(0.05)
     return False
@@ -105,29 +223,41 @@ def verify_payload(payload: bytes, payload_size: int, index: int) -> bool:
 
 class BLEReceiver:
     def __init__(self):
-        self._buf       = bytearray()
-        self._lock      = threading.Lock()
-        self._new_data  = threading.Event()
+        self._buf        = bytearray()
+        self._lock       = threading.Lock()
+        self._new_data   = threading.Event()
+        self._size       = None
+        self._size_ready = threading.Event()
+
+    def reset(self):
+        with self._lock:
+            self._buf.clear()
+            self._size = None
+        self._new_data.clear()
+        self._size_ready.clear()
 
     def handler(self, sender, data: bytearray):
+        try:
+            text = data.decode('utf-8')
+            if text.startswith("SIZE:"):
+                self._size = int(text.strip().split(":")[1])
+                print(f"  [BLE] SIZE: {self._size}B")
+                self._size_ready.set()
+                return
+            if text.strip() == "FAIL":
+                self._size = -1
+                self._size_ready.set()
+                return
+        except Exception:
+            pass
         with self._lock:
             self._buf.extend(data)
         self._new_data.set()
 
-    def read_until(self, marker: bytes, timeout=30):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            with self._lock:
-                idx = self._buf.find(marker)
-                if idx != -1:
-                    result = bytes(self._buf[:idx])
-                    del self._buf[:idx + len(marker)]
-                    return result
-            self._new_data.clear()
-            self._new_data.wait(timeout=0.5)
-        return None
+    def wait_for_size(self, timeout=30):
+        return self._size_ready.wait(timeout)
 
-    def read_exact(self, n: int, timeout=60):
+    def read_exact(self, n: int, timeout=BLE_TIMEOUT_S):
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
@@ -139,69 +269,70 @@ class BLEReceiver:
             self._new_data.wait(timeout=0.5)
         return None
 
-    def clear(self):
-        with self._lock:
-            self._buf.clear()
+    @property
+    def declared_size(self):
+        return self._size
 
 
 async def run_test_async(pico):
     print(f"\n[Test] Connecting to nRF via BLE...")
-    async with BleakClient(NRF_ADDRESS) as client:
-        print(f"[BLE] Connected: {client.is_connected}")
 
+    client = BleakClient(NRF_ADDRESS)
+    for attempt in range(5):
+        try:
+            await client.connect()
+            if client.is_connected:
+                print(f"[✓] BLE connected.")
+                break
+        except Exception as e:
+            print(f"[!] BLE attempt {attempt+1}/5 failed: {e}")
+            await asyncio.sleep(2)
+
+    if not client.is_connected:
+        print("[!] Could not connect to nRF.")
+        return
+
+    try:
         receiver = BLEReceiver()
         await client.start_notify(NUS_TX_UUID, receiver.handler)
+        print("[✓] Subscribed to BLE notifications.")
 
-        print("[Test] Waiting for Pico READY...")
-        if not wait_for_pico(pico, "READY", timeout=20):
-            print("[!] Pico did not send READY.")
-            await client.stop_notify(NUS_TX_UUID)
-            return
-
+        # BLE connected — now send go to Pico
+        pico.reset_input_buffer()
         pico.write(b"go\n")
         print("[Test] Sent 'go' to Pico.")
 
-        deadline = time.time() + 5
+        deadline = time.time() + 10
         while time.time() < deadline:
             if pico.in_waiting:
                 line = pico.readline().decode(errors='replace').strip()
-                if line: print(f"[Pico] {line}")
-                if line.startswith("START_IN_"): break
+                if line:
+                    print(f"[Pico] {line}")
+                if line.startswith("START_IN_"):
+                    break
             else:
-                time.sleep(0.05)
-
-        time.sleep(1)
+                time.sleep(0.01)
 
         for i, payload_size in enumerate(PAYLOAD_SIZES):
-            receiver.clear()
+            receiver.reset()
             print(f"\n  [→] {i+1}/{len(PAYLOAD_SIZES)} Waiting for {payload_size}B...")
 
-            # Wait for SIZE:N\n marker
-            size_line = receiver.read_until(b"\n", timeout=30)
-            if size_line is None:
-                print(f"  [!] No SIZE marker received, stopping.")
+            if not receiver.wait_for_size(timeout=30):
+                print(f"  [!] No SIZE header received, stopping.")
                 pico.write(b"SKIP\n")
                 break
 
-            size_line_str = size_line.decode('utf-8', errors='replace').strip()
-            print(f"  [BLE] Marker: '{size_line_str}'")
-
-            if not size_line_str.startswith("SIZE:"):
-                print(f"  [!] Unexpected marker: '{size_line_str}', stopping.")
+            if receiver.declared_size == -1:
+                print(f"  [!] nRF sent FAIL, stopping.")
                 pico.write(b"SKIP\n")
                 break
 
-            declared_size = int(size_line_str.replace("SIZE:", ""))
+            payload = receiver.read_exact(receiver.declared_size, timeout=BLE_TIMEOUT_S)
 
-            # Read exactly payload_size bytes
-            payload = receiver.read_exact(declared_size, timeout=60)
             if payload is None:
-                print(f"  [!] Timed out waiting for {payload_size}B payload.")
+                print(f"  [!] {payload_size}B timed out, stopping.")
                 pico.write(b"SKIP\n")
                 break
-
-            # Read END marker
-            receiver.read_until(b"END\n", timeout=10)
 
             verified = verify_payload(payload, payload_size, i)
             if verified:
@@ -210,31 +341,35 @@ async def run_test_async(pico):
                 print(f"  [✗] {payload_size}B FAILED verification")
 
             pico.write(b"ACK\n")
-            time.sleep(1)
+            receiver.reset()
+            time.sleep(IDLE_S)
 
         while pico.in_waiting:
             line = pico.readline().decode(errors='replace').strip()
-            if line: print(f"[Pico] {line}")
+            if line:
+                print(f"[Pico] {line}")
 
+    finally:
         await client.stop_notify(NUS_TX_UUID)
+        await client.disconnect()
         print("\n[✓] Test complete.")
 
 
 if __name__ == "__main__":
     upload_nrf()
-    upload_pico()
+    flash_pico()
 
     print("\n[Setup] Connecting to Pico...")
-    try:
-        pico = serial.Serial(PICO_PORT, PICO_BAUD, timeout=15)
-    except serial.SerialException as e:
-        print(f"[!] Could not open Pico port: {e}")
+    pico = open_pico_serial(PICO_PORT, PICO_BAUD)
+
+    print("\n[→] Checking Pico is alive...")
+    if not wait_for_pico(pico, "READY", timeout=30):
+        print("[!] Pico not responding.")
+        pico.close()
         exit(1)
+    print("[✓] Pico confirmed alive.")
 
-    time.sleep(2)
-    pico.reset_input_buffer()
-
-    print(f"\nPayloads: {PAYLOAD_SIZES}")
+    print(f"\nPayloads : {PAYLOAD_SIZES}")
     input("\nPress ENTER to begin → ")
 
     asyncio.run(run_test_async(pico))

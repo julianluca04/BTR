@@ -2,6 +2,7 @@
 
 BLEUart bleuart;
 volatile bool g_connected = false;
+String rxBuffer = "";
 
 void connect_callback(uint16_t conn_handle) {
   (void) conn_handle;
@@ -16,6 +17,7 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
 
 void setup() {
   pinMode(LED_RED, OUTPUT);
+  digitalWrite(LED_RED, HIGH);
   Serial1.begin(115200);
   delay(100);
 
@@ -35,28 +37,20 @@ void setup() {
 }
 
 void loop() {
-  digitalWrite(LED_RED, LOW);
-  delay(500);
-  digitalWrite(LED_RED, HIGH);
-  delay(500);
-
-  if (Serial1.available()) {
-    String msg = Serial1.readStringUntil('\n');
-    msg.trim();
-
-    // Only process if it looks like a real PING message
-    if (msg.startsWith("PING_")) {
-      // Fast blink to confirm valid UART received
-      for (int i = 0; i < 5; i++) {
-        digitalWrite(LED_RED, LOW);  delay(30);
-        digitalWrite(LED_RED, HIGH); delay(30);
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    if (c == '\n') {
+      rxBuffer.trim();
+      if (rxBuffer.startsWith("PING_")) {
+        digitalWrite(LED_RED, LOW); delay(30); digitalWrite(LED_RED, HIGH);
+        if (g_connected) {
+          String reply = "GOT:" + rxBuffer + "\n";
+          bleuart.write(reply.c_str(), reply.length());
+        }
       }
-
-      // Forward over BLE if connected
-      if (g_connected) {
-        String reply = "GOT:" + msg + "\n";
-        bleuart.write(reply.c_str(), reply.length());
-      }
+      rxBuffer = "";
+    } else {
+      rxBuffer += c;
     }
   }
 }
