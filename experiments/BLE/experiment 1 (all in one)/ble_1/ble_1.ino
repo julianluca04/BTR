@@ -99,6 +99,15 @@ void loop() {
   uint8_t* buf = (uint8_t*) malloc(size);
   if (!buf) {
     bleuart.write((uint8_t*)"FAIL\n", 5);
+    // Drain any partial payload bytes the Pico is still sending over UART.
+    // Wait until 500 ms of silence — then the line is clean for the next size.
+    uint32_t lastActivity = millis();
+    while (millis() - lastActivity < 500) {
+      if (Serial1.available()) {
+        Serial1.read();
+        lastActivity = millis();
+      }
+    }
     return;
   }
 
