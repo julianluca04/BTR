@@ -1,15 +1,11 @@
 """
-test3.py — chunked BLE relay (244-byte UART chunks)
+test1.py
 1. Uploads nRF sketch (once)
 2. Flashes Pico with MicroPython experiment code (once)
 3. For each run:
    a. Records a baseline with the HMC8012 multimeter
-   b. Connects BLE, orchestrates chunked test, ACKs Pico via USB serial
+   b. Connects BLE, orchestrates full-payload test, ACKs Pico via USB serial
    c. Saves meter samples + events to a per-run CSV
-
-Strategy: Pico sends 244 bytes at a time over UART → nRF buffers exactly
-244 bytes → immediately sends as one BLE notification → repeat.
-244 bytes = ATT MTU 247 - 3 bytes overhead; one UART chunk = one BLE packet.
 """
 
 import asyncio
@@ -27,31 +23,30 @@ import pyvisa
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 MODULE        = "ble_nrf52"
-STRATEGY      = "chunked_244"
+STRATEGY      = "full_payload"
 TOTAL_RUNS    = 30
 
 PAYLOAD_SIZES = [
     1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
-    1024, 2048, 4096, 8192, 16384, 32768, 65536
+    1024, 2048, 4096, 8192, 16384, 32768, 65536,
+    131072, 262144, 524288, 1048576
 ]
 
 PICO_PORT       = '/dev/cu.usbmodem11301'
 PICO_BAUD       = 115200
 NRF_ADDRESS     = "1385E324-4660-24ED-9B2E-A55F8DF154AE"
 NUS_TX_UUID     = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
-NRF_SKETCH_SRC  = '/Users/foml/coding/MSP/year_3/BTR/experiments/BLE/experiment 3 (chunk)/ble_3'
+NRF_SKETCH_SRC  = '/Users/foml/coding/MSP/year_3/BTR/experiments/BLE/experiment 1 (all in one)/ble_1'
 NRF_FQBN        = 'Seeeduino:nrf52:xiaonRF52840Sense'
 NRF_PORT        = '/dev/cu.usbmodem11101'
 SAFE_BUILD_BASE = '/tmp/ble_upload_tmp'
 
-UART_CHUNK_BYTES = 244  # matches nRF UART_CHUNK — one UART buffer = one BLE packet
-
-BLE_TIMEOUT_S   = 300
+BLE_TIMEOUT_S   = 300   # max wait for BLE data per payload
 IDLE_S          = 1.0
 BASELINE_S      = 5.0
 METER_WARMUP_S  = 2.0
 
-SHUNT_OHMS = 1.13  # measured shunt resistance
+SHUNT_OHMS = 1.0
 V_SUPPLY   = 3.3
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -67,8 +62,8 @@ led  = machine.Pin(25, machine.Pin.OUT)
 uart = machine.UART(0, baudrate=115200, tx=machine.Pin(0), rx=machine.Pin(1))
 
 PAYLOAD_SIZES  = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
-                  1024, 2048, 4096, 8192, 16384, 32768, 65536]
-UART_CHUNK     = 244   # matches nRF UART_CHUNK — one chunk = one BLE packet
+                  1024, 2048, 4096, 8192, 16384, 32768, 65536,
+                  131072, 262144, 524288, 1048576]
 SETTLE_MS      = 1000
 START_DELAY_MS = 500
 
@@ -110,22 +105,20 @@ while True:
                 sent = 0
                 aborted = False
                 while sent < size:
+                    # Check for mid-send abort (SKIP sent by Mac on nRF FAIL)
                     if select.select([sys.stdin], [], [], 0)[0]:
                         sys.stdin.readline()
                         aborted = True
                         break
-                    chunk = min(UART_CHUNK, size - sent)
+                    chunk = min(256, size - sent)
                     uart.write(digit * chunk)
                     sent += chunk
-                    # Gap must exceed the BLE connection interval (~30–50 ms on macOS)
-                    # so the nRF can drain its TX queue before the next chunk arrives.
-                    # UART TX of 244 bytes takes ~21 ms; sleep starts after write returns.
-                    # 50 ms gives ~50 ms gap — covers CI up to ~45 ms.
-                    time.sleep_ms(50)
+                    time.sleep_ms(10)
                 flash(2)
 
                 if aborted:
                     print("SKIPPED " + str(size) + "B")
+                    # Wait for Mac to ACK (it will send ACK after nRF drains)
                     response = usb_readline(timeout_ms=300000)
                     if response != "ACK":
                         print("NO_ACK got=" + response)
@@ -181,6 +174,12 @@ def upload_nrf():
 
 
 def flash_pico():
+    """Flash main.py onto the Pico and return the open serial port.
+
+    The port is kept open so that the 'READY' line printed by the new
+    main.py during boot is not lost when the port is closed/reopened.
+    The caller is responsible for closing the returned Serial object.
+    """
     print("\n[→] Flashing Pico via raw REPL...")
     ser = None
     for attempt in range(10):
@@ -197,25 +196,27 @@ def flash_pico():
     if ser is None:
         raise RuntimeError(f"Could not open Pico port {PICO_PORT} after 10 attempts.")
 
+    # Interrupt whatever is running
     for _ in range(20):
         ser.write(b'\x03')
         time.sleep(0.05)
     time.sleep(0.5)
     ser.reset_input_buffer()
 
+    # Enter raw REPL
     ser.write(b'\x01')
-    time.sleep(1.0)
+    time.sleep(1.0)  # give it time to respond
     response = ser.read(ser.in_waiting)
     print(f"[REPL] {response}")
 
     if b'raw REPL' not in response:
         print("[!] Trying Ctrl+B → Ctrl+D → Ctrl+A...")
-        ser.write(b'\x02')
+        ser.write(b'\x02')  # exit any REPL mode first
         time.sleep(0.5)
-        ser.write(b'\x04')
-        time.sleep(3.0)
+        ser.write(b'\x04')  # soft reboot
+        time.sleep(3.0)     # wait for boot
         ser.reset_input_buffer()
-        ser.write(b'\x01')
+        ser.write(b'\x01')  # enter raw REPL
         time.sleep(1.0)
         response = ser.read(ser.in_waiting)
         print(f"[REPL2] {response}")
@@ -231,10 +232,11 @@ def flash_pico():
     response = ser.read(ser.in_waiting)
     print(f"[Write] {response}")
 
-    ser.write(b'\x02')
+    ser.write(b'\x02')  # exit raw REPL
     time.sleep(0.5)
-    ser.write(b'\x04')
+    ser.write(b'\x04')  # soft reboot into main.py
 
+    # Keep the port open and wait for READY so the line isn't lost.
     print("[→] Waiting for Pico READY (on flash connection)...")
     ser.timeout = 15
     deadline = time.time() + 30
@@ -362,17 +364,26 @@ def meter_stream(meter, rows, stop_event, flush_callback):
 # ─── BLE receiver ─────────────────────────────────────────────────────────────
 
 class BLEReceiver:
+    """Asyncio-native BLE packet collector.
+
+    All public methods that wait for data are coroutines — they yield
+    control back to the event loop so bleak's notification callbacks can
+    run.  handler() is safe to call from any thread via call_soon_threadsafe.
+    """
+
     def __init__(self):
-        self._queue = None
+        self._queue = None   # asyncio.Queue; created in start()
         self._loop  = None
         self._size  = None
         self._fail  = False
 
     def start(self):
+        """Call once from within the running event loop before first use."""
         self._loop  = asyncio.get_running_loop()
         self._queue = asyncio.Queue()
 
     def reset(self):
+        """Drain leftover packets and clear state for the next payload."""
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -382,9 +393,11 @@ class BLEReceiver:
         self._fail = False
 
     def handler(self, sender, data: bytearray):
+        """BLE notification callback — called on the event loop thread by bleak."""
         self._queue.put_nowait(bytes(data))
 
     async def wait_for_size(self, timeout=300) -> bool:
+        """Consume packets until a SIZE:N or FAIL header is found."""
         deadline = self._loop.time() + timeout
         while True:
             rem = deadline - self._loop.time()
@@ -405,8 +418,10 @@ class BLEReceiver:
                     return True
             except Exception:
                 pass
+            # Non-text packet before SIZE header — discard and keep waiting
 
     async def read_exact(self, n: int, timeout=BLE_TIMEOUT_S):
+        """Collect exactly n bytes from queued BLE notification chunks."""
         buf      = bytearray()
         deadline = self._loop.time() + timeout
         while len(buf) < n:
@@ -432,6 +447,10 @@ class BLEReceiver:
 # ─── BLE test (async) ─────────────────────────────────────────────────────────
 
 async def run_ble_test_async(pico, write_event_row):
+    """Connect to nRF, run through all payload sizes, call write_event_row for each.
+
+    Returns list of (payload_size, status, elapsed_s) tuples.
+    """
     print(f"\n[BLE] Connecting to nRF...")
 
     client = BleakClient(NRF_ADDRESS)
@@ -447,6 +466,7 @@ async def run_ble_test_async(pico, write_event_row):
 
     if not client.is_connected:
         print("[!] Could not connect to nRF.")
+        # Pico never received 'go' so it is still in its idle ready loop
         return [], True
 
     results = []
@@ -455,13 +475,13 @@ async def run_ble_test_async(pico, write_event_row):
         receiver = BLEReceiver()
         receiver.start()
         await client.start_notify(NUS_TX_UUID, receiver.handler)
-        mtu = client.mtu_size
-        print(f"[✓] Subscribed to BLE notifications. MTU: {mtu}B ({mtu - 3}B effective chunk)")
+        print(f"[✓] Subscribed to BLE notifications. MTU: {client.mtu_size}B ({client.mtu_size - 3}B data)")
 
         pico.reset_input_buffer()
         pico.write(b"go\n")
         print("[BLE] Sent 'go' to Pico.")
 
+        # Wait for Pico START_IN_ confirmation
         deadline = time.time() + 10
         while time.time() < deadline:
             if pico.in_waiting:
@@ -484,7 +504,7 @@ async def run_ble_test_async(pico, write_event_row):
             print(f"\n  [{i+1}/{len(PAYLOAD_SIZES)}] Expecting {payload_size}B...")
             t_start = time.monotonic()
 
-            if not await receiver.wait_for_size(timeout=BLE_TIMEOUT_S):
+            if not await receiver.wait_for_size(timeout=300):
                 print(f"  [!] No SIZE header — stopping.")
                 pico.write(b"SKIP\n")
                 write_event_row(payload_size, payload_size, 0, tx_start, "FAILED",
@@ -493,12 +513,14 @@ async def run_ble_test_async(pico, write_event_row):
                 break
 
             if receiver.is_fail:
-                print(f"  [!] nRF sent FAIL — recording and continuing.")
+                print(f"  [!] nRF sent FAIL (malloc) — recording and continuing.")
                 pico.write(b"SKIP\n")
                 write_event_row(payload_size, payload_size, 0, tx_start,
                                 datetime.now().isoformat(timespec="milliseconds"),
-                                False, False, "nrf_fail")
+                                False, False, "nrf_malloc_fail")
                 results.append((payload_size, "FAIL", 0.0))
+                # Wait for nRF to drain leftover UART bytes (500ms silence window)
+                # then ACK Pico so it moves to the next size
                 await asyncio.sleep(1.5)
                 pico.write(b"ACK\n")
                 set_phase("idle")
@@ -514,7 +536,8 @@ async def run_ble_test_async(pico, write_event_row):
                 break
 
             payload = await receiver.read_exact(receiver.declared_size, timeout=BLE_TIMEOUT_S)
-            rx_end  = datetime.now().isoformat(timespec="milliseconds")
+
+            rx_end = datetime.now().isoformat(timespec="milliseconds")
 
             if payload is None:
                 print(f"  [!] {payload_size}B timed out.")
@@ -539,6 +562,7 @@ async def run_ble_test_async(pico, write_event_row):
             set_phase("idle")
             await asyncio.sleep(IDLE_S)
 
+        # Drain remaining Pico output; track whether READY arrived for the next run
         pico_ready_seen = False
         await asyncio.sleep(1)
         while pico.in_waiting:
@@ -565,8 +589,6 @@ def run_experiment(run_number, meter, pico, loop, pico_already_ready=False):
     stop_meter = threading.Event()
     set_phase("idle")
 
-    os.makedirs(OUT_DIR, exist_ok=True)
-
     if pico_already_ready:
         print(f"\n[Run {run_number:02d}/{TOTAL_RUNS}] Pico ready.")
     else:
@@ -578,23 +600,25 @@ def run_experiment(run_number, meter, pico, loop, pico_already_ready=False):
     csv_file = open(filename, "w", newline="")
     w = csv.writer(csv_file)
 
+    # ── META ──
     w.writerow(["# META"])
-    w.writerow(["module",            MODULE])
-    w.writerow(["strategy",          STRATEGY])
-    w.writerow(["uart_chunk_bytes",  UART_CHUNK_BYTES])
-    w.writerow(["ble_mtu",           247])
-    w.writerow(["ble_chunk_bytes",   244])
-    w.writerow(["run",               run_number])
-    w.writerow(["session",           SESSION_TAG])
-    w.writerow(["baseline_s",        BASELINE_S])
-    w.writerow(["shunt_ohms",        f"{SHUNT_OHMS:.6f}"])
-    w.writerow(["v_supply",          f"{V_SUPPLY:.3f}"])
+    w.writerow(["module",      MODULE])
+    w.writerow(["strategy",    STRATEGY])
+    w.writerow(["run",         run_number])
+    w.writerow(["session",     SESSION_TAG])
+    w.writerow(["baseline_s",  BASELINE_S])
+    w.writerow(["shunt_ohms",  f"{SHUNT_OHMS:.6f}"])
+    w.writerow(["v_supply",    f"{V_SUPPLY:.3f}"])
     w.writerow([])
+
+    # ── EVENTS header ──
     w.writerow(["# EVENTS"])
     w.writerow(["run", "payload_size", "declared_size",
                 "bytes_received", "tx_start", "rx_end",
                 "complete", "verified", "skip_reason"])
     w.writerow([])
+
+    # ── METER header ──
     w.writerow(["# METER"])
     w.writerow(["timestamp", "v_shunt", "phase"])
     csv_file.flush()
@@ -614,6 +638,7 @@ def run_experiment(run_number, meter, pico, loop, pico_already_ready=False):
         w.writerow(row)
         csv_file.flush()
 
+    # ── Baseline ──
     print(f"[Run {run_number:02d}] Recording {BASELINE_S}s baseline...")
     set_phase("baseline")
     m_thread = threading.Thread(
@@ -624,13 +649,16 @@ def run_experiment(run_number, meter, pico, loop, pico_already_ready=False):
     m_thread.start()
     time.sleep(BASELINE_S)
 
+    # ── BLE test ──
     results, pico_ready = loop.run_until_complete(run_ble_test_async(pico, write_event_row))
 
+    # ── Wrap up ──
     set_phase("idle")
     stop_meter.set()
     m_thread.join(timeout=3)
     csv_file.close()
 
+    # Print summary
     print(f"\n─── Run {run_number:02d} Results ──────────────────────────────────────")
     print(f"  {'Size':>10}   {'Status':<6}  {'Time':>8}  {'KB/s':>8}")
     print(f"  {'─'*10}   {'─'*6}  {'─'*8}  {'─'*8}")
@@ -653,9 +681,11 @@ if __name__ == "__main__":
 
     if do_upload in ("y", "yes"):
         upload_nrf()
-        pico = flash_pico()
+        pico = flash_pico()   # returns open port, already confirmed READY
         pico_ready = True
     else:
+        # Devices already programmed — just open the serial port and soft-reboot
+        # the Pico so it re-runs the existing main.py cleanly.
         print(f"\n[→] Opening Pico serial (skip flash)...")
         pico = None
         for attempt in range(10):
@@ -670,12 +700,13 @@ if __name__ == "__main__":
                 time.sleep(2)
         if pico is None:
             raise RuntimeError(f"Could not open Pico port {PICO_PORT}.")
+        # Interrupt any running code, then soft-reboot to run main.py
         for _ in range(3):
             pico.write(b'\x03')
             time.sleep(0.1)
         time.sleep(0.5)
         pico.reset_input_buffer()
-        pico.write(b'\x04')
+        pico.write(b'\x04')   # Ctrl+D soft reboot
         print("[→] Waiting for Pico READY...")
         pico_ready = wait_for_line(pico, "READY", timeout=15)
         if pico_ready:
@@ -683,12 +714,12 @@ if __name__ == "__main__":
         else:
             print("[!] Pico did not send READY — will wait at run start.")
 
+    # Persistent event loop reused across all runs
     loop = asyncio.new_event_loop()
 
     print(f"\nExperiment : {MODULE} | {STRATEGY}")
     print(f"Runs       : {TOTAL_RUNS}")
     print(f"Payloads   : {PAYLOAD_SIZES}")
-    print(f"UART chunk : {UART_CHUNK_BYTES}B = one BLE packet")
     print(f"Session    : {SESSION_TAG}")
     print(f"Output     : {OUT_DIR}")
     input("\nPress ENTER to begin → ")
@@ -698,7 +729,7 @@ if __name__ == "__main__":
             pico_ready = run_experiment(run, meter, pico, loop,
                                         pico_already_ready=pico_ready)
             if pico_ready is None:
-                pico_ready = False
+                pico_ready = False  # run was skipped
             if run < TOTAL_RUNS:
                 time.sleep(3)
     finally:

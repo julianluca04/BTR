@@ -40,9 +40,20 @@ void setup() {
   Bluefruit.Advertising.start(0);
 }
 
+// Read exactly `len` bytes from Serial1 before deadline.
+// Returns number of bytes actually read (< len only on timeout).
+static int readAll(uint8_t* buf, int len, uint32_t deadline) {
+  int got = 0;
+  while (got < len && millis() < deadline) {
+    if (Serial1.available()) buf[got++] = Serial1.read();
+  }
+  return got;
+}
+
 // Send `len` bytes over BLE in BLE_CHUNK-sized notifications.
-// Retries each write until it succeeds so no bytes are silently dropped.
-#define BLE_CHUNK 244  // ATT MTU 247 - 3 bytes overhead = 244 bytes max payload
+// Retries each write until it succeeds so no bytes are silently dropped
+// when the TX queue is momentarily full.
+#define BLE_CHUNK 240
 
 static void bleSend(const uint8_t* buf, int len) {
   int offset = 0;
@@ -52,17 +63,14 @@ static void bleSend(const uint8_t* buf, int len) {
     if (sent > 0) {
       offset += sent;
     } else {
-      yield();  // TX queue full — let BLE stack drain before retrying
+      delay(1);  // TX queue full — yield and retry
     }
   }
 }
 
-// UART chunk size matches BLE_CHUNK so each UART buffer fills exactly one
-// BLE notification. The nRF buffers UART_CHUNK bytes, sends them over BLE,
-// then immediately reads the next chunk — at most 244 bytes in RAM at once.
-#define UART_CHUNK 244
-
 void loop() {
+  // Gate only on connection — not notifyEnabled() which can return false
+  // even after the central has subscribed on this device/library version.
   if (!g_connected) {
     digitalWrite(LED_RED, LOW);  delay(100);
     digitalWrite(LED_RED, HIGH); delay(900);
@@ -85,50 +93,46 @@ void loop() {
   int size = line.toInt();
   if (size <= 0) return;
 
-  // Send SIZE header so the Mac knows how many bytes to expect
-  char hdr[24];
-  snprintf(hdr, sizeof(hdr), "SIZE:%d\n", size);
-  bleSend((uint8_t*)hdr, strlen(hdr));
-
-  // ── Chunked relay: buffer UART_CHUNK bytes, send immediately over BLE ──
-  // At most UART_CHUNK (244) bytes are held in RAM at any moment.
-  // This is the key difference from full_payload (entire message in RAM)
-  // and byte_for_byte (1 byte in RAM at a time).
-  uint8_t buf[UART_CHUNK];
-  uint32_t total_sent = 0;
-  uint32_t deadline   = millis() + 15000UL + (uint32_t)size;
-
-  digitalWrite(LED_RED, LOW);
-
-  while (total_sent < (uint32_t)size) {
-    if (millis() > deadline) {
-      // Drain remaining UART bytes so the line is clean for the next run
-      while (Serial1.available()) Serial1.read();
-      break;
-    }
-
-    // Fill the chunk buffer from UART up to UART_CHUNK bytes or remaining size
-    int to_read = min((int)UART_CHUNK, (int)(size - total_sent));
-    int got     = 0;
-    uint32_t chunkDeadline = millis() + 5000UL + (uint32_t)to_read;
-    while (got < to_read && millis() < chunkDeadline) {
+  // ── Buffer the entire payload from UART before sending anything over BLE ──
+  // This measures the latency impact of loading the full message onto the
+  // module first, rather than streaming bytes through as they arrive.
+  uint8_t* buf = (uint8_t*) malloc(size);
+  if (!buf) {
+    bleuart.write((uint8_t*)"FAIL\n", 5);
+    // Drain any partial payload bytes the Pico is still sending over UART.
+    // Wait until 500 ms of silence — then the line is clean for the next size.
+    uint32_t lastActivity = millis();
+    while (millis() - lastActivity < 500) {
       if (Serial1.available()) {
-        buf[got++] = Serial1.read();
-      } else {
-        yield();  // drain BLE TX queue while waiting for next UART byte
+        Serial1.read();
+        lastActivity = millis();
       }
     }
-
-    if (got == 0) continue;
-
-    // Immediately relay this chunk over BLE before reading the next one
-    bleSend(buf, got);
-    total_sent += got;
+    return;
   }
 
-  digitalWrite(LED_RED, HIGH);
+  // Allow generous time: 15 s headroom + 1 ms per byte at 115200 baud
+  uint32_t deadline = millis() + 15000UL + (uint32_t)size;
+  int got = readAll(buf, size, deadline);
 
-  // 3 quick flashes = done
+  if (got != size) {
+    free(buf);
+    bleuart.write((uint8_t*)"FAIL\n", 5);
+    return;
+  }
+
+  // LED: fast blink = about to send
+  digitalWrite(LED_RED, LOW); delay(30); digitalWrite(LED_RED, HIGH);
+
+  // ── Entire payload is in RAM — now send SIZE header then payload over BLE ──
+  char hdr[24];
+  snprintf(hdr, sizeof(hdr), "SIZE:%d\n", size);
+  bleSend((uint8_t*) hdr, strlen(hdr));
+  bleSend(buf, size);
+
+  free(buf);
+
+  // LED: 3 quick flashes = done
   for (int i = 0; i < 3; i++) {
     digitalWrite(LED_RED, LOW); delay(30); digitalWrite(LED_RED, HIGH); delay(30);
   }

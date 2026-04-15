@@ -42,7 +42,7 @@ void setup() {
 
 // Send `len` bytes over BLE in BLE_CHUNK-sized notifications.
 // Retries each write until it succeeds so no bytes are silently dropped.
-#define BLE_CHUNK 244  // ATT MTU 247 - 3 bytes overhead = 244 bytes max payload
+#define BLE_CHUNK 240
 
 static void bleSend(const uint8_t* buf, int len) {
   int offset = 0;
@@ -52,17 +52,15 @@ static void bleSend(const uint8_t* buf, int len) {
     if (sent > 0) {
       offset += sent;
     } else {
-      yield();  // TX queue full — let BLE stack drain before retrying
+      delay(1);  // TX queue full — yield and retry
     }
   }
 }
 
-// UART chunk size matches BLE_CHUNK so each UART buffer fills exactly one
-// BLE notification. The nRF buffers UART_CHUNK bytes, sends them over BLE,
-// then immediately reads the next chunk — at most 244 bytes in RAM at once.
-#define UART_CHUNK 244
 
 void loop() {
+  // Gate only on connection — not notifyEnabled() which can return false
+  // even after the central has subscribed on this device/library version.
   if (!g_connected) {
     digitalWrite(LED_RED, LOW);  delay(100);
     digitalWrite(LED_RED, HIGH); delay(900);
@@ -85,45 +83,47 @@ void loop() {
   int size = line.toInt();
   if (size <= 0) return;
 
-  // Send SIZE header so the Mac knows how many bytes to expect
+  // ── Send SIZE header as a single BLE notification so the Mac can parse it ──
   char hdr[24];
   snprintf(hdr, sizeof(hdr), "SIZE:%d\n", size);
   bleSend((uint8_t*)hdr, strlen(hdr));
 
-  // ── Chunked relay: buffer UART_CHUNK bytes, send immediately over BLE ──
-  // At most UART_CHUNK (244) bytes are held in RAM at any moment.
-  // This is the key difference from full_payload (entire message in RAM)
-  // and byte_for_byte (1 byte in RAM at a time).
-  uint8_t buf[UART_CHUNK];
-  uint32_t total_sent = 0;
-  uint32_t deadline   = millis() + 15000UL + (uint32_t)size;
+  // ── Byte-for-byte relay — 1 byte stored on nRF at a time ──
+  // The Pico paces its UART output to one byte every ~10 ms (≥ 1 BLE
+  // connection interval), so bytes never pile up here. pending_byte is the
+  // only buffer: at most 1 byte is held on the nRF at any moment.
+  // bleuart.write(&b, 1) is non-blocking: if the TX queue is momentarily
+  // full (returns 0) we retry next iteration without losing the byte.
+  bool     has_pending  = false;
+  uint8_t  pending_byte = 0;
+  uint32_t ble_sent     = 0;
+  uint32_t deadline     = millis() + 15000UL + (uint32_t)size * 15UL;
 
   digitalWrite(LED_RED, LOW);
 
-  while (total_sent < (uint32_t)size) {
+  while (ble_sent < (uint32_t)size) {
     if (millis() > deadline) {
-      // Drain remaining UART bytes so the line is clean for the next run
       while (Serial1.available()) Serial1.read();
       break;
     }
 
-    // Fill the chunk buffer from UART up to UART_CHUNK bytes or remaining size
-    int to_read = min((int)UART_CHUNK, (int)(size - total_sent));
-    int got     = 0;
-    uint32_t chunkDeadline = millis() + 5000UL + (uint32_t)to_read;
-    while (got < to_read && millis() < chunkDeadline) {
-      if (Serial1.available()) {
-        buf[got++] = Serial1.read();
-      } else {
-        yield();  // drain BLE TX queue while waiting for next UART byte
-      }
+    // Read one UART byte into the pending slot (only when slot is empty).
+    if (!has_pending && Serial1.available()) {
+      pending_byte = Serial1.read();
+      has_pending  = true;
     }
 
-    if (got == 0) continue;
-
-    // Immediately relay this chunk over BLE before reading the next one
-    bleSend(buf, got);
-    total_sent += got;
+    // Send pending byte as its own BLE notification (non-blocking).
+    // yield() when queue is full so the FreeRTOS BLE tasks can drain it —
+    // without this the app task spins tight and inflates the power reading.
+    if (has_pending) {
+      if (bleuart.write(&pending_byte, 1) > 0) {
+        has_pending = false;
+        ble_sent++;
+      } else {
+        yield();  // queue full — let BLE stack run before retrying
+      }
+    }
   }
 
   digitalWrite(LED_RED, HIGH);
