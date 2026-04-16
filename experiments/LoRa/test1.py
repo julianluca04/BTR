@@ -64,7 +64,7 @@ def connect_meter():
     meter.write("TRIG:COUN INF")
 
     try:
-        nplc = meter.query("SENS:RES:NPLC?").strip()
+        nplc = meter.query("SENS:VOLT:DC:NPLC?").strip()
         print(f"[Meter] NPLC confirmed: {nplc} (0.02 = fastest)")
     except Exception:
         pass
