@@ -15,10 +15,10 @@ PAYLOAD_SIZES = [
 ] #gotta edit the data sizes 
 # 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576
 
-PICO_PORT      = "/dev/tty.usbmodem1433301"
+PICO_PORT      = "/dev/cu.usbmodem143301"
 PICO_BAUD      = 115200
 
-RX_PORT = "/dev/tty.usbmodem141201"  # <-- receiver RN2903
+RX_PORT = "/dev/cu.usbmodem141201"  # <-- receiver RN2903
 RX_BAUD = 57600
 
 IDLE_S         = 1.0
