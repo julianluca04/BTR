@@ -1,0 +1,155 @@
+#include <Arduino.h>
+
+const int LED_PIN = 25;
+
+const int NUM_PAYLOADS = 20;
+const long PAYLOAD_SIZES[NUM_PAYLOADS] = {
+  1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
+  1024, 2048, 4096, 8192, 16384, 32768, 65536,
+  131072, 262144, 524288
+};
+const int SETTLE_MS          = 1000;
+const int START_DELAY_MS     = 500;
+const int CHUNK_SIZE         = 1460;  // TCP MSS — send in natural segment boundaries
+const int ESP32_BOOT_TIMEOUT = 15000;
+
+bool started = false;
+
+void flashLED(int times) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(80);
+    digitalWrite(LED_PIN, LOW);
+    delay(80);
+  }
+}
+
+void waitForAckOrSkip(bool &skipRun) {
+  unsigned long t = millis();
+  while (millis() - t < 120000) {
+    if (Serial.available()) {
+      String msg = Serial.readStringUntil('\n');
+      msg.trim();
+      if (msg == "ACK")  { return; }
+      if (msg == "SKIP") { skipRun = true; return; }
+    }
+    delay(10);
+  }
+  skipRun = true;
+}
+
+bool waitForESP32Boot() {
+  unsigned long t = millis();
+  while (millis() - t < ESP32_BOOT_TIMEOUT) {
+    if (Serial1.available()) {
+      String msg = Serial1.readStringUntil('\n');
+      msg.trim();
+      if (msg == "BOOT") return true;
+    }
+    delay(10);
+  }
+  return false;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  delay(2000);
+
+  Serial.println("[Pico] Waiting for ESP32 boot...");
+  if (waitForESP32Boot()) {
+    Serial.println("[Pico] ESP32 booted.");
+  } else {
+    Serial.println("[Pico] WARNING: ESP32 boot timeout on startup.");
+  }
+}
+
+void loop() {
+  if (!started) {
+    Serial.println("READY");
+    unsigned long t = millis();
+    while (millis() - t < 500) {
+      if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        if (cmd == "go") {
+          Serial.print("START_IN_");
+          Serial.println(START_DELAY_MS);
+          delay(START_DELAY_MS);
+          started = true;
+          return;
+        }
+      }
+      delay(10);
+    }
+    return;
+  }
+
+  bool skipRun = false;
+
+  for (int i = 0; i < NUM_PAYLOADS; i++) {
+    if (skipRun) break;
+
+    long size  = PAYLOAD_SIZES[i];
+    char digit = '0' + (i % 10);
+
+    Serial1.println(size);
+
+    delay(5);
+    while (Serial1.available()) Serial1.read();
+
+    // Fill send buffer once per payload with this payload's digit.
+    // Reuse the same static buffer — no heap allocation.
+    static uint8_t sendBuf[CHUNK_SIZE];
+    memset(sendBuf, (uint8_t)digit, CHUNK_SIZE);
+
+    // Send in CHUNK_SIZE blocks. No flow control needed:
+    // at 115200 baud each 1460-byte block takes ~127ms to clock out,
+    // which is the natural pacing for the ESP32 to drain and TCP-flush.
+    long sent = 0;
+    while (sent < size) {
+      int chunkBytes = (int)min((long)CHUNK_SIZE, size - sent);
+      Serial1.write(sendBuf, chunkBytes);
+      sent += chunkBytes;
+    }
+
+    String esp32Response = "";
+    unsigned long t = millis();
+    while (millis() - t < 120000) {
+      if (Serial1.available()) {
+        esp32Response = Serial1.readStringUntil('\n');
+        esp32Response.trim();
+        break;
+      }
+      delay(10);
+    }
+
+    if (esp32Response == "FAIL") {
+      Serial.print("ESP32_FAIL ");
+      Serial.println(size);
+      waitForAckOrSkip(skipRun);
+      skipRun = true;
+    } else {
+      Serial.print("SENT ");
+      Serial.print(size);
+      Serial.println("B");
+      flashLED(1);
+      waitForAckOrSkip(skipRun);
+    }
+
+    if (!skipRun) delay(SETTLE_MS);
+  }
+
+  Serial1.println("DONE");
+  Serial.println("[Pico] Sent DONE to ESP32, waiting for reboot...");
+  if (!waitForESP32Boot()) {
+    Serial.println("[Pico] WARNING: ESP32 reboot timeout after run.");
+  } else {
+    Serial.println("[Pico] ESP32 rebooted cleanly.");
+  }
+
+  Serial.println("DONE");
+  flashLED(3);
+  started = false;
+}
