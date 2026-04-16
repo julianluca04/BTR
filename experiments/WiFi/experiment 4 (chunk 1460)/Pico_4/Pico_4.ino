@@ -2,16 +2,15 @@
 
 const int LED_PIN = 25;
 
-const int NUM_PAYLOADS = 19;
+const int NUM_PAYLOADS = 20;
 const long PAYLOAD_SIZES[NUM_PAYLOADS] = {
   1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
   1024, 2048, 4096, 8192, 16384, 32768, 65536,
-  131072, 262144
-  // 524288 excluded — ESP32-C3 heap fragmentation above ~262KB across repeated runs
+  131072, 262144, 524288
 };
 const int SETTLE_MS          = 1000;
 const int START_DELAY_MS     = 500;
-const int FLOW_WINDOW        = 64;
+const int CHUNK_SIZE         = 1460;  // TCP MSS — send in natural segment boundaries
 const int ESP32_BOOT_TIMEOUT = 15000;
 
 bool started = false;
@@ -100,35 +99,19 @@ void loop() {
     delay(5);
     while (Serial1.available()) Serial1.read();
 
+    // Fill send buffer once per payload with this payload's digit.
+    // Reuse the same static buffer — no heap allocation.
+    static uint8_t sendBuf[CHUNK_SIZE];
+    memset(sendBuf, (uint8_t)digit, CHUNK_SIZE);
+
+    // Send in CHUNK_SIZE blocks. No flow control needed:
+    // at 115200 baud each 1460-byte block takes ~127ms to clock out,
+    // which is the natural pacing for the ESP32 to drain and TCP-flush.
     long sent = 0;
-    bool transferFail = false;
-
     while (sent < size) {
-      Serial1.write(digit);
-      sent++;
-
-      if (sent % FLOW_WINDOW == 0 && sent < size) {
-        unsigned long t = millis();
-        bool gotRdy = false;
-        while (millis() - t < 5000) {
-          if (Serial1.available()) {
-            String msg = Serial1.readStringUntil('\n');
-            msg.trim();
-            if (msg == "RDY")  { gotRdy = true; break; }
-            if (msg == "FAIL") { transferFail = true; break; }
-          }
-          delay(1);
-        }
-        if (!gotRdy) { transferFail = true; break; }
-      }
-    }
-
-    if (transferFail) {
-      Serial.print("ESP32_FAIL ");
-      Serial.println(size);
-      waitForAckOrSkip(skipRun);
-      skipRun = true;
-      continue;
+      int chunkBytes = (int)min((long)CHUNK_SIZE, size - sent);
+      Serial1.write(sendBuf, chunkBytes);
+      sent += chunkBytes;
     }
 
     String esp32Response = "";

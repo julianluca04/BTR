@@ -5,20 +5,25 @@ HardwareSerial picoSerial(1);
 const int RX_PIN = 20;
 const int TX_PIN = 21;
 
-const char* AP_SSID = "esp32_test";
-const char* AP_PASS = "esp32test";
-const char* MAC_IP  = "192.168.4.2";
+const char* AP_SSID  = "esp32_test";
+const char* AP_PASS  = "esp32test";
+const char* MAC_IP   = "192.168.4.2";
 const int   MAC_PORT = 8080;
 
-const int CHUNK_SIZE  = 1460;  // TCP MSS — natural segment boundary
-const int FLOW_WINDOW = 64;
+// 1460 bytes = TCP MSS (Ethernet MTU 1500 - IP header 20 - TCP header 20)
+// One UART chunk = one TCP segment — no IP fragmentation.
+#define CHUNK_SIZE 1460
 
 static uint8_t chunkBuf[CHUNK_SIZE];
 
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  picoSerial.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
+  // 32 KB RX buffer: at 115200 baud (11520 B/s), 32768 B = ~2.84 s of headroom.
+  // TCP write rate (~11453 B/s) is fractionally below UART rate (11520 B/s), so
+  // cumulative lag (~2.8 KB after a full 524288 B transfer) plus brief WiFi stalls
+  // overflowed the previous 16 KB buffer. 32 KB absorbs both.
+  picoSerial.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN, false, 32768);
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
@@ -37,23 +42,6 @@ void loop() {
   String cmd = picoSerial.readStringUntil('\n');
   cmd.trim();
 
-  if (cmd == "WIFI_OFF") {
-    esp_wifi_stop();
-    picoSerial.println("WIFI_OFF_OK");
-    return;
-  }
-  if (cmd == "WIFI_ON") {
-    esp_wifi_start();
-    WiFi.softAP(AP_SSID, AP_PASS);
-    picoSerial.println("WIFI_ON_OK");
-    return;
-  }
-  if (cmd == "SLEEP") {
-    picoSerial.println("SLEEP_OK");
-    delay(100);
-    esp_deep_sleep_start();
-    return;
-  }
   if (cmd == "DONE") {
     Serial.println("[ESP32] Run complete, restarting...");
     delay(200);
@@ -62,10 +50,7 @@ void loop() {
   }
 
   long payloadSize = cmd.toInt();
-  if (payloadSize <= 0) {
-    picoSerial.println("FAIL");
-    return;
-  }
+  if (payloadSize <= 0) return;
 
   Serial.print("[ESP32] Expecting ");
   Serial.print(payloadSize);
@@ -78,36 +63,40 @@ void loop() {
     return;
   }
 
+  // Send SIZE header so Mac knows how many bytes to expect
   client.print("SIZE:" + String(payloadSize) + "\n");
 
-  long forwarded  = 0;
-  int  chunkCount = 0;
-  long flowCount  = 0;
+  long     forwarded  = 0;
+  int      chunkCount = 0;
   unsigned long lastByte = millis();
 
+  // Timeout: 60 s base + actual UART transfer time (payloadSize bytes at 115200 baud,
+  // 10 bits/byte → payloadSize * 10 / 115 ms), doubled for WiFi jitter headroom.
+  // 60 s minimum gives the UART hardware buffer time to drain after a WiFi stall.
+  unsigned long timeout_ms = 60000UL + (unsigned long)payloadSize * 20UL / 115UL;
+
   while (forwarded < payloadSize) {
-    if (picoSerial.available()) {
-      chunkBuf[chunkCount] = picoSerial.read();
-      chunkCount++;
-      forwarded++;
-      flowCount++;
+    if (millis() - lastByte > timeout_ms) {
+      Serial.println("[ESP32] Timeout waiting for UART bytes.");
+      break;
+    }
+
+    // Read all available bytes at once — prevents UART RX buffer overflow
+    // when client.write() briefly stalls the loop.
+    int avail = picoSerial.available();
+    if (avail > 0) {
+      int toRead = min(avail, CHUNK_SIZE - chunkCount);
+      for (int j = 0; j < toRead; j++) {
+        chunkBuf[chunkCount++] = picoSerial.read();
+      }
+      forwarded += toRead;
       lastByte = millis();
 
-      // Flush chunk to TCP when full or payload complete
+      // Flush to TCP when chunk is full or payload is complete
       if (chunkCount >= CHUNK_SIZE || forwarded == payloadSize) {
         client.write(chunkBuf, chunkCount);
         chunkCount = 0;
       }
-
-      // Send RDY every FLOW_WINDOW bytes for Pico flow control
-      if (flowCount >= FLOW_WINDOW && forwarded < payloadSize) {
-        picoSerial.println("RDY");
-        flowCount = 0;
-      }
-
-    } else if (millis() - lastByte > 10000) {
-      Serial.println("[ESP32] Timeout waiting for bytes.");
-      break;
     }
   }
 
