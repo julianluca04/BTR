@@ -1,9 +1,7 @@
 import pyvisa
 import csv
-import socket
 import os
 import serial
-import subprocess
 import threading
 import time
 from datetime import datetime, timedelta
@@ -13,20 +11,22 @@ MODULE        = "LoRa"
 STRATEGY      = "full_payload"
 TOTAL_RUNS    = 30
 PAYLOAD_SIZES = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
-    1024, 2048, 4096, 8192, 16384, 32768, 65536,
-    131072, 262144, 524288, 1048576
+    1, 2, 4, 8, 16, 32, 64, 128, 220
 ] #gotta edit the data sizes 
+# 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576
 
-PICO_PORT      = "/dev/tty.usbmodem21101"
+PICO_PORT      = "/dev/tty.usbmodem1433301"
 PICO_BAUD      = 115200
+
+RX_PORT = "/dev/tty.usbmodem141201"  # <-- receiver RN2903
+RX_BAUD = 57600
 
 IDLE_S         = 1.0
 BASELINE_S     = 5.0
 METER_WARMUP_S = 2.0
 
 SHUNT_OHMS = 1.1
-V_SUPPLY   = 5.013517
+V_SUPPLY   = 3.3
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 SESSION_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -237,6 +237,42 @@ def run_experiment(run_number, meter, pico):
     print(f"[Run {run_number}] saved → {filename}")
 
 
+def send_cmd_dev(dev, cmd):
+    dev.write((cmd + "\r\n").encode())
+    time.sleep(0.05)
+
+
+def receiver_loop(rx, stop_event):
+    print("[RX] Receiver thread started")
+
+    # Initial RX mode
+    send_cmd_dev(rx, "sys reset")
+    time.sleep(1)
+
+    send_cmd_dev(rx, "mac pause")
+    send_cmd_dev(rx, "radio set mod lora")
+    send_cmd_dev(rx, "radio set freq 868100000")
+    send_cmd_dev(rx, "radio set sf sf7")
+    send_cmd_dev(rx, "radio set bw 125")
+    send_cmd_dev(rx, "radio set cr 4/5")
+    send_cmd_dev(rx, "radio set crc on")
+
+    send_cmd_dev(rx, "radio rx 0")
+
+    while not stop_event.is_set():
+        if rx.in_waiting:
+            line = rx.readline().decode(errors="ignore").strip()
+            if line:
+                print(f"[RX] {line}")
+
+                # If packet received → restart RX
+                if line.startswith("radio_rx"):
+                    send_cmd_dev(rx, "radio rx 0")
+
+        else:
+            time.sleep(0.01)
+
+    print("[RX] Receiver thread stopped")
 
 
 
@@ -248,12 +284,26 @@ if __name__ == "__main__":
     time.sleep(2)
     pico.reset_input_buffer()
 
-    # RN2903 BASIC CONFIG
-    print("[Setup] Configuring RN2903...")
+    rx = serial.Serial(RX_PORT, RX_BAUD, timeout=1)
+    time.sleep(2)
+    rx.reset_input_buffer()
+
+    # Start RX thread
+    rx_stop = threading.Event()
+    rx_thread = threading.Thread(
+        target=receiver_loop,
+        args=(rx, rx_stop),
+        daemon=True
+    )
+    rx_thread.start()
+
+    # TX config
+    print("[Setup] Configuring TX RN2903...")
 
     send_cmd(pico, "sys reset")
     time.sleep(1)
 
+    send_cmd(pico, "mac pause")
     send_cmd(pico, "radio set mod lora")
     send_cmd(pico, "radio set freq 868100000")
     send_cmd(pico, "radio set sf sf7")
@@ -268,5 +318,11 @@ if __name__ == "__main__":
         run_experiment(run, meter, pico)
         time.sleep(2)
 
+    # Cleanup
+    rx_stop.set()
+    rx_thread.join(timeout=2)
+
     pico.close()
+    rx.close()
+
     print("All runs complete.")
