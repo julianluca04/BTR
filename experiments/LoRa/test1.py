@@ -57,9 +57,9 @@ def connect_meter():
 
     meter = reopen_meter()
 
-    meter.write("CONF:RES")
-    meter.write("SENS:RES:RANG:AUTO ON")
-    meter.write("SENS:RES:NPLC 0.02")
+    meter.write("CONF:VOLT:DC")
+    meter.write("SENS:VOLT:DC:RANG:AUTO ON")
+    meter.write("SENS:VOLT:DC:NPLC 0.02")
     meter.write("TRIG:SOUR IMM")
     meter.write("TRIG:COUN INF")
 
@@ -69,7 +69,7 @@ def connect_meter():
     except Exception:
         pass
 
-    print("[Meter] Configured for maximum sample rate (resistance).")
+    print("[Meter] Configured for maximum sample rate (DC voltage).")
 
     print("[Meter] Warming up...")
     deadline = time.time() + METER_WARMUP_S
