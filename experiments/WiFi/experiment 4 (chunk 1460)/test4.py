@@ -33,6 +33,8 @@ ESP32_SSID     = "esp32_test"
 ESP32_FQBN     = "esp32:esp32:esp32c3"
 ESP32_PORT     = "/dev/tty.usbmodem11101"
 ESP32_SKETCH   = "/Users/foml/coding/MSP/year_3/BTR/experiments/WiFi/experiment 4 (chunk 1460)/wifi_4"
+PICO_FQBN      = "rp2040:rp2040:rpipico"
+PICO_SKETCH    = "/Users/foml/coding/MSP/year_3/BTR/experiments/WiFi/experiment 4 (chunk 1460)/Pico_4"
 SAFE_BUILD_DIR = "/tmp/wifi_upload_tmp"
 
 IDLE_S              = 1.0
@@ -50,151 +52,6 @@ OUT_DIR     = os.path.join(SCRIPT_DIR, "data", MODULE, STRATEGY, SESSION_TAG)
 os.makedirs(OUT_DIR, exist_ok=True)
 # ──────────────────────────────────────────────────────────────────────────────
 
-# MicroPython main.py flashed onto the Pico.
-# Sends payload in 1460-byte UART chunks — no flow control needed at this
-# chunk size since 1460 bytes at 115200 baud takes ~127ms to transmit,
-# giving the ESP32 ample time to drain each chunk before the next arrives.
-PICO_CODE = '''\
-import machine, time, sys, select
-
-led  = machine.Pin(25, machine.Pin.OUT)
-uart = machine.UART(0, baudrate=115200, tx=machine.Pin(0), rx=machine.Pin(1))
-
-PAYLOAD_SIZES  = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
-                  1024, 2048, 4096, 8192, 16384, 32768, 65536,
-                  131072, 262144, 524288]
-UART_CHUNK     = 1460
-SETTLE_MS      = 1000
-START_DELAY_MS = 500
-ESP32_BOOT_MS  = 15000
-
-def flash(n):
-    for _ in range(n):
-        led.value(1); time.sleep_ms(80)
-        led.value(0); time.sleep_ms(80)
-
-def usb_readline(timeout_ms=120000):
-    buf = b""
-    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
-    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        if select.select([sys.stdin], [], [], 0.01)[0]:
-            c = sys.stdin.read(1)
-            if c == "\\n":
-                return buf.decode("utf-8", "replace").strip()
-            buf += c.encode()
-    return ""
-
-def wait_for_esp32_boot(timeout_ms=15000):
-    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
-    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        if uart.any():
-            line = uart.readline()
-            if line and b"BOOT" in line:
-                return True
-        time.sleep_ms(10)
-    return False
-
-print("[Pico] Waiting for ESP32 boot...")
-if wait_for_esp32_boot():
-    print("[Pico] ESP32 booted.")
-else:
-    print("[Pico] WARNING: ESP32 boot timeout.")
-
-print("READY")
-
-while True:
-    led.value(1); time.sleep_ms(100)
-    led.value(0); time.sleep_ms(900)
-
-    if select.select([sys.stdin], [], [], 0)[0]:
-        cmd = sys.stdin.readline().strip()
-        if cmd == "go":
-            print("START_IN_" + str(START_DELAY_MS))
-            time.sleep_ms(START_DELAY_MS)
-
-            for i, size in enumerate(PAYLOAD_SIZES):
-                digit = bytes([ord("0") + (i % 10)])
-
-                uart.write((str(size) + "\\n").encode())
-                time.sleep_ms(50)
-                while uart.any():
-                    uart.read(uart.any())
-
-                flash(1)
-                sent = 0
-                skip_run = False
-
-                while sent < size:
-                    if select.select([sys.stdin], [], [], 0)[0]:
-                        msg = sys.stdin.readline().strip()
-                        if msg == "SKIP":
-                            skip_run = True
-                            break
-
-                    chunk = min(UART_CHUNK, size - sent)
-                    uart.write(digit * chunk)
-                    sent += chunk
-                    # No explicit inter-chunk pause needed:
-                    # 1460 bytes at 115200 baud takes ~127ms to transmit —
-                    # ESP32 drains each chunk before the next byte arrives.
-
-                flash(2)
-
-                if skip_run:
-                    print("SKIPPED " + str(size) + "B")
-                    response = usb_readline()
-                    if response != "ACK":
-                        print("NO_ACK got=" + response)
-                        break
-                    time.sleep_ms(SETTLE_MS)
-                    continue
-
-                # Wait for ESP32 OK/FAIL over UART.
-                # Compare bytes directly — avoids MicroPython UnicodeError on
-                # stale/framing bytes if decode() error handling is not honoured.
-                esp32_resp = ""
-                deadline2 = time.ticks_add(time.ticks_ms(), 120000)
-                while time.ticks_diff(deadline2, time.ticks_ms()) > 0:
-                    if uart.any():
-                        line = uart.readline()
-                        if b"OK" in line:
-                            esp32_resp = "OK"
-                            break
-                        elif b"FAIL" in line:
-                            esp32_resp = "FAIL"
-                            break
-                    time.sleep_ms(10)
-
-                if esp32_resp == "FAIL":
-                    print("ESP32_FAIL " + str(size) + "B")
-                    response = usb_readline()
-                    if response != "ACK":
-                        print("NO_ACK got=" + response)
-                        break
-                    time.sleep_ms(SETTLE_MS)
-                    continue
-
-                print("SENT " + str(size) + "B")
-                response = usb_readline()
-                if response == "ACK":
-                    time.sleep_ms(SETTLE_MS)
-                else:
-                    print("NO_ACK got=" + response)
-                    break
-
-            # Signal ESP32 to restart for next run
-            uart.write(b"DONE\\n")
-            print("[Pico] Sent DONE to ESP32, waiting for reboot...")
-
-            if wait_for_esp32_boot():
-                print("[Pico] ESP32 rebooted cleanly.")
-            else:
-                print("[Pico] WARNING: ESP32 reboot timeout after run.")
-
-            flash(3)
-            print("DONE")
-            print("READY")
-'''
 
 
 # ─── Upload helpers ───────────────────────────────────────────────────────────
@@ -229,75 +86,26 @@ def upload_esp32():
     time.sleep(5)
 
 
-def flash_pico():
-    print("\n[→] Flashing Pico via raw REPL...")
-    ser = None
-    for attempt in range(10):
-        try:
-            ser = serial.Serial(PICO_PORT, PICO_BAUD, timeout=2)
-            break
-        except serial.SerialException:
-            if attempt == 0:
-                ports = [p.device for p in serial.tools.list_ports.comports()]
-                print(f"[!] Pico not found at {PICO_PORT}. Available: {ports}")
-                print(f"    Plug in the Pico — retrying every 2s...")
-            time.sleep(2)
-    if ser is None:
-        raise RuntimeError(f"Could not open Pico port {PICO_PORT} after 10 attempts.")
-
-    for _ in range(20):
-        ser.write(b'\x03')
-        time.sleep(0.05)
-    time.sleep(0.5)
-    ser.reset_input_buffer()
-
-    ser.write(b'\x01')
-    time.sleep(1.0)
-    response = ser.read(ser.in_waiting)
-    print(f"[REPL] {response}")
-
-    if b'raw REPL' not in response:
-        print("[!] Trying Ctrl+B → Ctrl+D → Ctrl+A...")
-        ser.write(b'\x02')
-        time.sleep(0.5)
-        ser.write(b'\x04')
-        time.sleep(3.0)
-        ser.reset_input_buffer()
-        ser.write(b'\x01')
-        time.sleep(1.0)
-        response = ser.read(ser.in_waiting)
-        print(f"[REPL2] {response}")
-
-    if b'raw REPL' not in response:
-        ser.close()
-        raise RuntimeError("Could not enter raw REPL")
-
-    escaped = PICO_CODE.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n')
-    cmd = f"f=open('main.py','w');f.write('{escaped}');f.close()\x04"
-    ser.write(cmd.encode())
+def upload_pico():
+    print("\n[→] Compiling & uploading Pico sketch...")
+    sketch = PICO_SKETCH
+    if " " in sketch or "(" in sketch or ")" in sketch:
+        name = os.path.basename(os.path.normpath(sketch))
+        safe = os.path.join(SAFE_BUILD_DIR, name)
+        if os.path.exists(safe):
+            shutil.rmtree(safe)
+        shutil.copytree(sketch, safe)
+        sketch = safe
+        print(f"[→] Copied sketch to: {sketch}")
+    run_cmd(["arduino-cli", "compile", "--fqbn", PICO_FQBN, sketch])
+    rc = run_cmd(["arduino-cli", "upload", "-p", PICO_PORT, "-b", PICO_FQBN, sketch], check=False)
+    if rc != 0:
+        print("[!] Upload failed — hold BOOTSEL on Pico, press ENTER")
+        input("    → ")
+        time.sleep(1)
+        run_cmd(["arduino-cli", "upload", "-p", PICO_PORT, "-b", PICO_FQBN, sketch])
+    print("[✓] Pico uploaded. Waiting 3s to boot...")
     time.sleep(3)
-    response = ser.read(ser.in_waiting)
-    print(f"[Write] {response}")
-
-    ser.write(b'\x02')
-    time.sleep(0.5)
-    ser.write(b'\x04')
-
-    print("[→] Waiting for Pico READY (on flash connection)...")
-    ser.timeout = 15
-    deadline = time.time() + 40
-    while time.time() < deadline:
-        if ser.in_waiting:
-            line = ser.readline().decode(errors='replace').strip()
-            if line:
-                print(f"[Pico] {line}")
-            if line == "READY":
-                print("[✓] Pico flashed and ready.")
-                return ser
-        time.sleep(0.05)
-
-    ser.close()
-    raise RuntimeError("Pico did not print READY after flashing")
 
 
 # ─── WiFi check ───────────────────────────────────────────────────────────────
@@ -698,49 +506,44 @@ def run_experiment(run_number, attempt_number, meter, pico, pico_already_ready=F
 if __name__ == "__main__":
     meter = connect_meter()
 
-    do_upload = input("\nUpload ESP32 + flash Pico? [y/n] → ").strip().lower()
-
+    do_upload = input("\nUpload ESP32 + Pico? [y/n] → ").strip().lower()
     if do_upload in ("y", "yes"):
         upload_esp32()
-        pico = flash_pico()
-        pico_ready = True
-    else:
-        print(f"\n[→] Opening Pico serial (skip flash)...")
-        pico = None
-        for attempt in range(10):
-            try:
-                pico = serial.Serial(PICO_PORT, PICO_BAUD, timeout=15)
+        upload_pico()
+
+    print(f"\n[→] Opening Pico serial...")
+    pico = None
+    for attempt in range(10):
+        try:
+            pico = serial.Serial(PICO_PORT, PICO_BAUD, timeout=15)
+            break
+        except serial.SerialException:
+            if attempt == 0:
+                ports = [p.device for p in serial.tools.list_ports.comports()]
+                print(f"[!] Pico not found at {PICO_PORT}. Available: {ports}")
+                print(f"    Plug in the Pico — retrying every 2s...")
+            time.sleep(2)
+    if pico is None:
+        raise RuntimeError(f"Could not open Pico port {PICO_PORT}.")
+
+    time.sleep(1)
+    pico.reset_input_buffer()
+    print("[→] Waiting for Pico READY...")
+    deadline = time.time() + 40
+    pico_ready = False
+    while time.time() < deadline:
+        if pico.in_waiting:
+            line = pico.readline().decode(errors='replace').strip()
+            if line:
+                print(f"[Pico] {line}")
+            if line == "READY":
+                pico_ready = True
                 break
-            except serial.SerialException:
-                if attempt == 0:
-                    ports = [p.device for p in serial.tools.list_ports.comports()]
-                    print(f"[!] Pico not found at {PICO_PORT}. Available: {ports}")
-                    print(f"    Plug in the Pico — retrying every 2s...")
-                time.sleep(2)
-        if pico is None:
-            raise RuntimeError(f"Could not open Pico port {PICO_PORT}.")
-        for _ in range(3):
-            pico.write(b'\x03')
-            time.sleep(0.1)
-        time.sleep(0.5)
-        pico.reset_input_buffer()
-        pico.write(b'\x04')
-        print("[→] Waiting for Pico READY...")
-        deadline = time.time() + 40
-        pico_ready = False
-        while time.time() < deadline:
-            if pico.in_waiting:
-                line = pico.readline().decode(errors='replace').strip()
-                if line:
-                    print(f"[Pico] {line}")
-                if line == "READY":
-                    pico_ready = True
-                    break
-            time.sleep(0.05)
-        if pico_ready:
-            print("[✓] Pico ready.")
-        else:
-            print("[!] Pico did not send READY — will wait at run start.")
+        time.sleep(0.05)
+    if pico_ready:
+        print("[✓] Pico ready.")
+    else:
+        print("[!] Pico did not send READY — will wait at run start.")
 
     check_wifi()
 
