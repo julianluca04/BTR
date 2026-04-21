@@ -1,10 +1,21 @@
-import pyvisa
+"""
+test4.py — chunked WiFi relay experiment (1460-byte TCP MSS chunks)
+1. Uploads ESP32 + Pico Arduino sketches
+2. For each run:
+   a. Records a baseline with the HMC8012 multimeter
+   b. Orchestrates chunked transfer across all payload sizes
+   c. Saves meter samples + events to a per-run CSV
+
+Architecture: Pico → UART Serial1 (1460-byte chunks) → ESP32 → TCP/WiFi → Mac
+"""
+
 import csv
-import socket
 import os
+import pyvisa
 import serial
 import serial.tools.list_ports
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -53,7 +64,6 @@ os.makedirs(OUT_DIR, exist_ok=True)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-
 # ─── Upload helpers ───────────────────────────────────────────────────────────
 
 def run_cmd(cmd, check=True):
@@ -64,17 +74,21 @@ def run_cmd(cmd, check=True):
     return result.returncode
 
 
-def upload_esp32():
-    print("\n[→] Compiling & uploading ESP32 sketch...")
-    sketch = ESP32_SKETCH
-    if " " in sketch or "(" in sketch or ")" in sketch:
-        name = os.path.basename(os.path.normpath(sketch))
+def _safe_copy(sketch_path):
+    if " " in sketch_path or "(" in sketch_path or ")" in sketch_path:
+        name = os.path.basename(os.path.normpath(sketch_path))
         safe = os.path.join(SAFE_BUILD_DIR, name)
         if os.path.exists(safe):
             shutil.rmtree(safe)
-        shutil.copytree(sketch, safe)
-        sketch = safe
-        print(f"[→] Copied sketch to: {sketch}")
+        shutil.copytree(sketch_path, safe)
+        print(f"[→] Copied sketch to: {safe}")
+        return safe
+    return sketch_path
+
+
+def upload_esp32():
+    print("\n[→] Compiling & uploading ESP32 sketch...")
+    sketch = _safe_copy(ESP32_SKETCH)
     run_cmd(["arduino-cli", "compile", "--fqbn", ESP32_FQBN, sketch])
     rc = run_cmd(["arduino-cli", "upload", "-p", ESP32_PORT, "-b", ESP32_FQBN, sketch], check=False)
     if rc != 0:
@@ -88,15 +102,7 @@ def upload_esp32():
 
 def upload_pico():
     print("\n[→] Compiling & uploading Pico sketch...")
-    sketch = PICO_SKETCH
-    if " " in sketch or "(" in sketch or ")" in sketch:
-        name = os.path.basename(os.path.normpath(sketch))
-        safe = os.path.join(SAFE_BUILD_DIR, name)
-        if os.path.exists(safe):
-            shutil.rmtree(safe)
-        shutil.copytree(sketch, safe)
-        sketch = safe
-        print(f"[→] Copied sketch to: {sketch}")
+    sketch = _safe_copy(PICO_SKETCH)
     run_cmd(["arduino-cli", "compile", "--fqbn", PICO_FQBN, sketch])
     rc = run_cmd(["arduino-cli", "upload", "-p", PICO_PORT, "-b", PICO_FQBN, sketch], check=False)
     if rc != 0:
@@ -111,7 +117,6 @@ def upload_pico():
 # ─── WiFi check ───────────────────────────────────────────────────────────────
 
 def get_mac_wifi_ip():
-    """Return the Mac's IP on the esp32_test AP subnet (192.168.4.x), or None."""
     for iface in ["en0", "en1", "en2", "en3"]:
         try:
             r = subprocess.run(["ipconfig", "getifaddr", iface],
@@ -139,8 +144,8 @@ def check_wifi():
                 if mac_ip:
                     print(f"[WiFi] Mac IP on AP: {mac_ip}")
                     if mac_ip != "192.168.4.2":
-                        print(f"[WiFi] ⚠ WARNING: Mac IP is {mac_ip}, not 192.168.4.2!")
-                        print(f"         The ESP32 sketch uses dynamic IP detection now, so this should be OK.")
+                        print(f"[WiFi] ⚠ WARNING: Mac IP is {mac_ip}, not 192.168.4.2 — "
+                              f"ESP32 uses dynamic IP detection so this should be OK.")
                 else:
                     print("[WiFi] ⚠ Could not detect Mac IP on 192.168.4.x — check interface")
                 return
@@ -156,7 +161,6 @@ def check_wifi():
 # ─── ESP32 serial monitor ─────────────────────────────────────────────────────
 
 def esp32_monitor(stop_event, esp32_port, baud=115200):
-    """Read ESP32 USB serial and print its output prefixed with [ESP32]."""
     try:
         with serial.Serial(esp32_port, baud, timeout=1) as esp:
             esp.reset_input_buffer()
@@ -276,6 +280,7 @@ def recv_exact(conn, expected_size, total_timeout=TCP_RECEIVE_TIMEOUT):
         print(f"  [!] recv_exact error: {e}")
     return buf
 
+
 def recv_line(conn, max_bytes=64, total_timeout=10):
     buf = b""
     deadline = time.time() + total_timeout
@@ -292,6 +297,7 @@ def recv_line(conn, max_bytes=64, total_timeout=10):
             continue
     return buf
 
+
 def verify_payload(payload: bytes, payload_size: int, index: int) -> bool:
     expected_byte = ord('0') + (index % 10)
     if len(payload) != payload_size:
@@ -303,6 +309,7 @@ def verify_payload(payload: bytes, payload_size: int, index: int) -> bool:
               f"(expected 0x{expected_byte:02x} = '{chr(expected_byte)}')")
         return False
     return True
+
 
 def wait_for_pico(pico, expected, timeout=60):
     deadline = time.time() + timeout
@@ -324,9 +331,9 @@ def run_experiment(run_number, attempt_number, meter, pico, pico_already_ready=F
     filename = os.path.join(
         OUT_DIR, f"{MODULE}_{STRATEGY}_run{run_number:02d}.csv"
     )
-    meter_rows     = []
-    event_rows     = []
-    stop_meter     = threading.Event()
+    meter_rows        = []
+    event_rows        = []
+    stop_meter        = threading.Event()
     highest_completed = 0
     set_phase("idle")
 
@@ -371,6 +378,15 @@ def run_experiment(run_number, attempt_number, meter, pico, pico_already_ready=F
 
         def flush_meter_row(entry):
             w.writerow([entry["timestamp"], entry["value"], entry["phase"]])
+            csv_file.flush()
+
+        def write_event_row(payload_size, declared_size, bytes_received,
+                            tx_start, rx_end, complete, verified, skip_reason):
+            row = [run_number, payload_size, declared_size,
+                   bytes_received, tx_start, rx_end,
+                   complete, verified, skip_reason]
+            event_rows.append(row)
+            w.writerow(row)
             csv_file.flush()
 
         print(f"[Run {run_number:02d}] Recording {BASELINE_S}s baseline...")
@@ -419,7 +435,7 @@ def run_experiment(run_number, attempt_number, meter, pico, pico_already_ready=F
         time.sleep(IDLE_S)
 
         skip_remaining = False
-        results = []
+        results        = []
 
         for i, payload_size in enumerate(PAYLOAD_SIZES):
             if skip_remaining:
@@ -441,9 +457,9 @@ def run_experiment(run_number, attempt_number, meter, pico, pico_already_ready=F
 
                 t_elapsed  = time.monotonic() - t_start
                 throughput = payload_size / t_elapsed if t_elapsed > 0 else 0
-                verified = verify_payload(payload, payload_size, i)
-                complete = len(payload) == declared
-                status   = "PASS" if verified else "FAIL"
+                verified   = verify_payload(payload, payload_size, i)
+                complete   = len(payload) == declared
+                status     = "PASS" if verified else "FAIL"
 
                 print(f"  [{status}] {payload_size}B  {t_elapsed:.2f}s  {throughput/1024:.1f} KB/s")
                 results.append((payload_size, status, t_elapsed))
@@ -451,24 +467,11 @@ def run_experiment(run_number, attempt_number, meter, pico, pico_already_ready=F
                 if verified:
                     highest_completed = payload_size
 
-                event_rows.append({
-                    "payload_size":   payload_size,
-                    "declared_size":  declared,
-                    "bytes_received": len(payload),
-                    "tx_start":       tx_start,
-                    "rx_end":         rx_end,
-                    "complete":       complete,
-                    "verified":       verified,
-                    "skip_reason":    "",
-                })
-                w.writerow([run_number, payload_size, declared,
-                            len(payload), tx_start, rx_end,
-                            complete, verified, ""])
-                csv_file.flush()
+                write_event_row(payload_size, declared, len(payload),
+                                tx_start, rx_end, complete, verified, "")
                 pico.write(b"ACK\n")
 
             except socket.timeout:
-                # Check if ESP32 sent FAIL over UART (Pico forwards it to Mac)
                 esp32_fail = False
                 deadline2  = time.time() + 2
                 while time.time() < deadline2:
@@ -488,19 +491,8 @@ def run_experiment(run_number, attempt_number, meter, pico, pico_already_ready=F
                 t_elapsed = time.monotonic() - t_start
                 print(f"  [!] {payload_size}B failed ({skip_reason}) after {t_elapsed:.2f}s — skipping remaining.")
                 results.append((payload_size, "FAIL", t_elapsed))
-                event_rows.append({
-                    "payload_size":   payload_size,
-                    "declared_size":  payload_size,
-                    "bytes_received": 0,
-                    "tx_start":       tx_start,
-                    "rx_end":         "FAILED",
-                    "complete":       False,
-                    "verified":       False,
-                    "skip_reason":    skip_reason,
-                })
-                w.writerow([run_number, payload_size, payload_size,
-                            0, tx_start, "FAILED", False, False, skip_reason])
-                csv_file.flush()
+                write_event_row(payload_size, payload_size, 0,
+                                tx_start, "FAILED", False, False, skip_reason)
                 pico.write(b"SKIP\n")
                 skip_remaining = True
 
@@ -535,6 +527,7 @@ def run_experiment(run_number, attempt_number, meter, pico, pico_already_ready=F
         passed = sum(1 for _, s, _ in results if s == "PASS")
         print(f"[✓] Run {run_number:02d} complete. {passed}/{len(results)} passed.")
         print(f"    → {filename}")
+        print(f"    ({len(meter_rows)} meter samples, {len(event_rows)} events)")
         print(f"    Highest completed: {highest_completed}B (threshold: {MIN_VALID_PAYLOAD}B)")
 
         return highest_completed >= MIN_VALID_PAYLOAD, pico_ready_seen
@@ -568,7 +561,6 @@ if __name__ == "__main__":
     if pico is None:
         raise RuntimeError(f"Could not open Pico port {PICO_PORT}.")
 
-    # Start ESP32 serial monitor (read-only — just for diagnostics)
     esp32_stop = threading.Event()
     esp32_mon  = threading.Thread(
         target=esp32_monitor,
@@ -581,7 +573,7 @@ if __name__ == "__main__":
     time.sleep(1)
     pico.reset_input_buffer()
     print("[→] Waiting for Pico READY...")
-    deadline = time.time() + 40
+    deadline   = time.time() + 40
     pico_ready = False
     while time.time() < deadline:
         if pico.in_waiting:
@@ -611,26 +603,28 @@ if __name__ == "__main__":
     completed_runs = 0
     run_number     = 1
 
-    while completed_runs < TOTAL_RUNS:
-        attempt = 1
-        while True:
-            valid, pico_ready = run_experiment(run_number, attempt, meter, pico,
-                                               pico_already_ready=pico_ready)
-            if valid:
-                print(f"[✓] Run {run_number} accepted ({completed_runs + 1}/{TOTAL_RUNS}).\n")
-                completed_runs += 1
-                run_number += 1
-                break
-            else:
-                print(f"[✗] Run {run_number} failed before {MIN_VALID_PAYLOAD}B "
-                      f"— retrying (attempt {attempt + 1})...")
-                attempt += 1
-                time.sleep(5)
+    try:
+        while completed_runs < TOTAL_RUNS:
+            attempt = 1
+            while True:
+                valid, pico_ready = run_experiment(run_number, attempt, meter, pico,
+                                                   pico_already_ready=pico_ready)
+                if valid:
+                    print(f"[✓] Run {run_number} accepted ({completed_runs + 1}/{TOTAL_RUNS}).\n")
+                    completed_runs += 1
+                    run_number += 1
+                    break
+                else:
+                    print(f"[✗] Run {run_number} failed before {MIN_VALID_PAYLOAD}B "
+                          f"— retrying (attempt {attempt + 1})...")
+                    attempt += 1
+                    time.sleep(5)
 
-        if completed_runs < TOTAL_RUNS:
-            time.sleep(3)
+            if completed_runs < TOTAL_RUNS:
+                time.sleep(3)
+    finally:
+        pico.close()
+        esp32_stop.set()
+        esp32_mon.join(timeout=2)
 
-    pico.close()
-    esp32_stop.set()
-    esp32_mon.join(timeout=2)
     print(f"\nAll {TOTAL_RUNS} valid runs complete.")

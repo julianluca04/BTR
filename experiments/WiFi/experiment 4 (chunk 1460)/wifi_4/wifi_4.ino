@@ -14,7 +14,7 @@ const int   MAC_PORT = 8080;
 #define CHUNK_SIZE 1460
 
 static uint8_t chunkBuf[CHUNK_SIZE];
-static String  clientIP = "";  // learned dynamically when Mac connects via DHCP
+static String  clientIP = "";
 
 void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   if (event == ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED) {
@@ -71,7 +71,6 @@ void loop() {
   Serial.print("B  heap=");
   Serial.println(ESP.getFreeHeap());
 
-  // Use dynamically discovered IP; fall back to DHCP default only as last resort
   String targetIP = clientIP.length() > 0 ? clientIP : "192.168.4.2";
   Serial.println("[ESP32] Connecting to " + targetIP + ":" + String(MAC_PORT));
 
@@ -81,20 +80,22 @@ void loop() {
     picoSerial.println("FAIL");
     return;
   }
-  client.setNoDelay(true);  // disable Nagle — send immediately, don't buffer
+  client.setNoDelay(true);
   Serial.println("[ESP32] TCP connected.");
 
-  // Send SIZE header so Mac knows how many bytes to expect
   client.print("SIZE:" + String(payloadSize) + "\n");
 
-  long     forwarded  = 0;
-  int      chunkCount = 0;
-  unsigned long lastByte = millis();
-  // Timeout: 60 s base + actual UART transfer time (payloadSize/115200*10), doubled.
-  unsigned long timeout_ms = 60000UL + (unsigned long)payloadSize * 20UL / 115UL;
+  long          forwarded   = 0;
+  int           chunkCount  = 0;
+  unsigned long lastByte    = millis();
+
+  // Per-byte idle timeout: must comfortably cover the Pico's INTER_CHUNK_DELAY_MS
+  // (10 ms) plus UART clock time for one 1460-byte chunk (~127 ms) plus WiFi
+  // stack latency.  500 ms is safe; 10 s was the original wifi_3 value.
+  const unsigned long BYTE_TIMEOUT_MS = 2000;
 
   while (forwarded < payloadSize) {
-    if (millis() - lastByte > timeout_ms) {
+    if (millis() - lastByte > BYTE_TIMEOUT_MS) {
       Serial.print("[ESP32] UART timeout after ");
       Serial.print(forwarded);
       Serial.print("/");
@@ -102,32 +103,29 @@ void loop() {
       break;
     }
 
-    int avail = picoSerial.available();
-    if (avail > 0) {
-      if (forwarded == 0) {
-        Serial.print("[ESP32] First UART data: avail=");
-        Serial.println(avail);
-      }
-      int toRead = min(avail, CHUNK_SIZE - chunkCount);
-      for (int j = 0; j < toRead; j++) {
-        chunkBuf[chunkCount++] = picoSerial.read();
-      }
-      forwarded += toRead;
-      lastByte = millis();
+    if (!picoSerial.available()) continue;
 
-      // Flush to TCP when chunk is full or payload is complete
-      if (chunkCount >= CHUNK_SIZE || forwarded == payloadSize) {
-        int written = client.write(chunkBuf, chunkCount);
-        Serial.print("[ESP32] TCP wrote ");
-        Serial.print(written);
-        Serial.print("/");
-        Serial.print(chunkCount);
-        Serial.print("B  total=");
-        Serial.print(forwarded);
-        Serial.print("/");
-        Serial.println(payloadSize);
-        chunkCount = 0;
-      }
+    if (forwarded == 0) {
+      Serial.print("[ESP32] First byte arrived, avail=");
+      Serial.println(picoSerial.available());
+    }
+
+    chunkBuf[chunkCount++] = picoSerial.read();
+    forwarded++;
+    lastByte = millis();
+
+    // Flush to TCP when the 1460-byte chunk is full, or the payload is complete.
+    if (chunkCount >= CHUNK_SIZE || forwarded == payloadSize) {
+      int written = client.write(chunkBuf, chunkCount);
+      Serial.print("[ESP32] TCP wrote ");
+      Serial.print(written);
+      Serial.print("/");
+      Serial.print(chunkCount);
+      Serial.print("B  total=");
+      Serial.print(forwarded);
+      Serial.print("/");
+      Serial.println(payloadSize);
+      chunkCount = 0;
     }
   }
 
