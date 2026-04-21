@@ -13,15 +13,6 @@ const int   MAC_PORT = 8080;
 #define CHUNK_SIZE    1460
 #define TCP_WRITE_SIZE 512
 
-// Minimum write timeout (ms) regardless of payload size.
-// Scales up by 1 second per 4096 bytes for large payloads.
-#define WRITE_TIMEOUT_BASE_MS   15000UL
-#define WRITE_TIMEOUT_PER_4K_MS  1000UL
-
-// UART idle timeout: how long to wait for the next byte from the Pico.
-// 5000 ms gives enough headroom for the Pico inter-chunk delay + UART TX time.
-#define UART_BYTE_TIMEOUT_MS    5000UL
-
 static uint8_t chunkBuf[CHUNK_SIZE];
 static String  clientIP = "";
 static bool    apReady  = false;
@@ -41,10 +32,11 @@ void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 }
 
 // Write all bytes without flush() inside the loop.
-// Timeout scales with payload size so large transfers don't expire mid-stream.
-bool writeAll(WiFiClient &client, const uint8_t *buf, int len, unsigned long timeoutMs) {
+// setNoDelay(true) handles immediate delivery; flush() inside blocks the CPU
+// and causes UART RX buffer overflow on large payloads.
+bool writeAll(WiFiClient &client, const uint8_t *buf, int len) {
   int sent = 0;
-  unsigned long deadline = millis() + timeoutMs;
+  unsigned long deadline = millis() + 15000UL;
   while (sent < len) {
     if (millis() > deadline) {
       Serial.println("[ESP32] writeAll timeout");
@@ -65,12 +57,6 @@ bool writeAll(WiFiClient &client, const uint8_t *buf, int len, unsigned long tim
   return true;
 }
 
-// Compute a write timeout that scales with payload size.
-unsigned long writeTimeoutMs(long payloadSize) {
-  unsigned long extra = ((unsigned long)payloadSize / 4096UL) * WRITE_TIMEOUT_PER_4K_MS;
-  return WRITE_TIMEOUT_BASE_MS + extra;
-}
-
 void setup() {
   Serial.begin(115200);
   delay(2000);
@@ -85,6 +71,9 @@ void setup() {
   Serial.println(WiFi.softAPIP());
   Serial.println("[ESP32] Waiting for Mac to connect to AP...");
 
+  // Block here until the Mac has joined the AP and received a DHCP lease.
+  // Only then signal the Pico to start — this ensures apReady is true for
+  // every payload including the very first one after a cold boot or restart.
   while (!apReady) delay(50);
 
   Serial.println("[ESP32] Mac connected. Signalling Pico to boot.");
@@ -111,15 +100,13 @@ void loop() {
     return;
   }
 
-  unsigned long txTimeout = writeTimeoutMs(payloadSize);
   Serial.print("[ESP32] Expecting ");
   Serial.print(payloadSize);
   Serial.print("B  heap=");
-  Serial.print(ESP.getFreeHeap());
-  Serial.print("  writeTimeout=");
-  Serial.print(txTimeout);
-  Serial.println("ms");
+  Serial.println(ESP.getFreeHeap());
 
+  // If the Mac briefly disconnected and reconnected between payloads,
+  // wait up to 5 s for apReady to come back before giving up.
   if (!apReady) {
     Serial.println("[ESP32] Waiting for client IP...");
     unsigned long t = millis();
@@ -147,10 +134,11 @@ void loop() {
   long          forwarded  = 0;
   int           chunkCount = 0;
   unsigned long lastByte   = millis();
+  const unsigned long BYTE_TIMEOUT_MS = 2000;
   bool          tcpFailed  = false;
 
   while (forwarded < payloadSize) {
-    if (millis() - lastByte > UART_BYTE_TIMEOUT_MS) {
+    if (millis() - lastByte > BYTE_TIMEOUT_MS) {
       Serial.print("[ESP32] UART timeout after ");
       Serial.print(forwarded);
       Serial.print("/");
@@ -170,7 +158,7 @@ void loop() {
     lastByte = millis();
 
     if (chunkCount >= CHUNK_SIZE || forwarded == payloadSize) {
-      if (!writeAll(client, chunkBuf, chunkCount, txTimeout)) {
+      if (!writeAll(client, chunkBuf, chunkCount)) {
         Serial.print("[ESP32] TCP write failed at ");
         Serial.print(forwarded);
         Serial.print("/");

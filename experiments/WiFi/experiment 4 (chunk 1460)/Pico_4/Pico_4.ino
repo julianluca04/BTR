@@ -12,16 +12,11 @@ const int SETTLE_MS             = 1000;
 const int START_DELAY_MS        = 500;
 const int CHUNK_SIZE            = 1460;
 const int ESP32_BOOT_TIMEOUT    = 15000;
-
-// Reduced from 10ms → 2ms.
-// At 10ms: 65536B / 1460 ≈ 45 chunks × 10ms = 450ms of pure idle delay per payload,
-// which accumulates across many TCP write cycles and risks triggering the ESP32's
-// UART byte timeout between chunks. 2ms is enough to yield the ESP32 UART ISR
-// without stalling the overall transfer.
-const int INTER_CHUNK_DELAY_MS  = 2;
+const int INTER_CHUNK_DELAY_MS  = 10;
 
 // Wait after sending the size line before blasting payload bytes.
 // Must cover: ESP32 parsing size + apReady check + client.connect() (~200 ms).
+// 800 ms gives comfortable headroom after a post-run restart.
 const int TCP_CONNECT_WAIT_MS = 800;
 
 bool started = false;
