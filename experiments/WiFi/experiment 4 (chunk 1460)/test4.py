@@ -110,6 +110,20 @@ def upload_pico():
 
 # ─── WiFi check ───────────────────────────────────────────────────────────────
 
+def get_mac_wifi_ip():
+    """Return the Mac's IP on the esp32_test AP subnet (192.168.4.x), or None."""
+    for iface in ["en0", "en1", "en2", "en3"]:
+        try:
+            r = subprocess.run(["ipconfig", "getifaddr", iface],
+                               capture_output=True, text=True, timeout=3)
+            ip = r.stdout.strip()
+            if r.returncode == 0 and ip.startswith("192.168.4."):
+                return ip
+        except Exception:
+            pass
+    return None
+
+
 def check_wifi():
     airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
     while True:
@@ -121,6 +135,14 @@ def check_wifi():
             )
             if ssid == ESP32_SSID:
                 print(f"[WiFi] ✓ Connected to '{ESP32_SSID}'")
+                mac_ip = get_mac_wifi_ip()
+                if mac_ip:
+                    print(f"[WiFi] Mac IP on AP: {mac_ip}")
+                    if mac_ip != "192.168.4.2":
+                        print(f"[WiFi] ⚠ WARNING: Mac IP is {mac_ip}, not 192.168.4.2!")
+                        print(f"         The ESP32 sketch uses dynamic IP detection now, so this should be OK.")
+                else:
+                    print("[WiFi] ⚠ Could not detect Mac IP on 192.168.4.x — check interface")
                 return
             else:
                 print(f"\n[!] Wrong WiFi — currently on '{ssid}'")
@@ -129,6 +151,26 @@ def check_wifi():
         except Exception:
             print("[WiFi] Could not check — ensure you're on esp32_test manually.")
             return
+
+
+# ─── ESP32 serial monitor ─────────────────────────────────────────────────────
+
+def esp32_monitor(stop_event, esp32_port, baud=115200):
+    """Read ESP32 USB serial and print its output prefixed with [ESP32]."""
+    try:
+        with serial.Serial(esp32_port, baud, timeout=1) as esp:
+            esp.reset_input_buffer()
+            while not stop_event.is_set():
+                if esp.in_waiting:
+                    line = esp.readline().decode(errors='replace').strip()
+                    if line:
+                        print(f"[ESP32] {line}", flush=True)
+                else:
+                    time.sleep(0.05)
+    except serial.SerialException as e:
+        print(f"[ESP32 monitor] Port error: {e}")
+    except Exception as e:
+        print(f"[ESP32 monitor] Error: {e}")
 
 
 # ─── Meter ────────────────────────────────────────────────────────────────────
@@ -526,6 +568,16 @@ if __name__ == "__main__":
     if pico is None:
         raise RuntimeError(f"Could not open Pico port {PICO_PORT}.")
 
+    # Start ESP32 serial monitor (read-only — just for diagnostics)
+    esp32_stop = threading.Event()
+    esp32_mon  = threading.Thread(
+        target=esp32_monitor,
+        args=(esp32_stop, ESP32_PORT),
+        daemon=True,
+    )
+    esp32_mon.start()
+    print(f"[→] ESP32 serial monitor started on {ESP32_PORT}.")
+
     time.sleep(1)
     pico.reset_input_buffer()
     print("[→] Waiting for Pico READY...")
@@ -579,4 +631,6 @@ if __name__ == "__main__":
             time.sleep(3)
 
     pico.close()
+    esp32_stop.set()
+    esp32_mon.join(timeout=2)
     print(f"\nAll {TOTAL_RUNS} valid runs complete.")
