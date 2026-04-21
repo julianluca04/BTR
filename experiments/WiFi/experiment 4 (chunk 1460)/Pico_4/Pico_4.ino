@@ -8,15 +8,23 @@ const long PAYLOAD_SIZES[NUM_PAYLOADS] = {
   1024, 2048, 4096, 8192, 16384, 32768, 65536,
   131072, 262144, 524288
 };
-const int SETTLE_MS          = 1000;
-const int START_DELAY_MS     = 500;
-const int CHUNK_SIZE         = 1460;
-const int ESP32_BOOT_TIMEOUT = 15000;
-const int TCP_CONNECT_WAIT_MS   = 400;
-const int INTER_CHUNK_DELAY_MS  = 10;
+const int SETTLE_MS             = 1000;
+const int START_DELAY_MS        = 500;
+const int CHUNK_SIZE            = 1460;
+const int ESP32_BOOT_TIMEOUT    = 15000;
 
-bool started     = false;
-bool warmRestarted = false;  // true after the initial warm-restart cycle completes
+// Reduced from 10ms → 2ms.
+// At 10ms: 65536B / 1460 ≈ 45 chunks × 10ms = 450ms of pure idle delay per payload,
+// which accumulates across many TCP write cycles and risks triggering the ESP32's
+// UART byte timeout between chunks. 2ms is enough to yield the ESP32 UART ISR
+// without stalling the overall transfer.
+const int INTER_CHUNK_DELAY_MS  = 2;
+
+// Wait after sending the size line before blasting payload bytes.
+// Must cover: ESP32 parsing size + apReady check + client.connect() (~200 ms).
+const int TCP_CONNECT_WAIT_MS = 800;
+
+bool started = false;
 
 void flashLED(int times) {
   for (int i = 0; i < times; i++) {
@@ -58,28 +66,20 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   delay(2000);
 
-  // Wait for ESP32's initial cold-boot BOOT signal
-  Serial.println("[Pico] Waiting for ESP32 cold boot...");
-  if (!waitForESP32Boot()) {
-    Serial.println("[Pico] WARNING: ESP32 cold boot timeout.");
-  } else {
-    Serial.println("[Pico] ESP32 cold boot received.");
-  }
+  // Drain anything the ESP32 may have sent during cold boot.
+  delay(3000);
+  while (Serial1.available()) Serial1.read();
 
-  // Immediately trigger a warm restart on the ESP32 so that all runs
-  // start from a consistent post-restart heap state (not cold-boot heap).
-  // This eliminates the attempt-1 failure caused by cold-boot heap fragmentation.
-  Serial.println("[Pico] Triggering ESP32 warm restart...");
+  // Unconditionally force a warm restart so every run starts from a consistent
+  // post-restart heap state regardless of cold-boot timing.
+  Serial.println("[Pico] Forcing ESP32 warm restart...");
   Serial1.println("DONE");
-  delay(500);  // give ESP32 time to call ESP.restart()
 
-  if (!waitForESP32Boot()) {
-    Serial.println("[Pico] WARNING: ESP32 warm restart timeout.");
+  if (waitForESP32Boot()) {
+    Serial.println("[Pico] ESP32 warm restart complete.");
   } else {
-    Serial.println("[Pico] ESP32 warm restart complete — heap state normalised.");
+    Serial.println("[Pico] ESP32 warm restart timeout — continuing anyway.");
   }
-
-  warmRestarted = true;
 }
 
 void loop() {
@@ -111,8 +111,10 @@ void loop() {
     long size  = PAYLOAD_SIZES[i];
     char digit = '0' + (i % 10);
 
+    // Send size line then wait for ESP32 to open TCP connection.
     Serial1.println(size);
     delay(TCP_CONNECT_WAIT_MS);
+    // Drain any stale bytes (e.g. lingering OK from previous payload).
     while (Serial1.available()) Serial1.read();
 
     static uint8_t sendBuf[CHUNK_SIZE];
@@ -123,6 +125,8 @@ void loop() {
       int chunkBytes = (int)min((long)CHUNK_SIZE, size - sent);
       Serial1.write(sendBuf, chunkBytes);
       sent += chunkBytes;
+      // Brief inter-chunk gap prevents the ESP32 UART RX buffer from filling
+      // faster than it drains into TCP. Skip delay after the last chunk.
       if (sent < size) delay(INTER_CHUNK_DELAY_MS);
     }
 

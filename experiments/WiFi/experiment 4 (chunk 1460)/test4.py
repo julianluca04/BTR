@@ -1,12 +1,15 @@
 """
 test4.py — chunked WiFi relay experiment (1460-byte TCP MSS chunks)
-1. Uploads ESP32 + Pico Arduino sketches
+1. Uploads ESP32 + Pico Arduino sketches (ESP32 USB connected for upload only)
 2. For each run:
    a. Records a baseline with the HMC8012 multimeter
    b. Orchestrates chunked transfer across all payload sizes
    c. Saves meter samples + events to a per-run CSV
 
 Architecture: Pico → UART Serial1 (1460-byte chunks) → ESP32 → TCP/WiFi → Mac
+Note: After upload the ESP32 USB cable is unplugged. The ESP32 runs on power
+supplied via the Pico's 3.3V pin. The USB serial monitor and warm-restart BOOT
+signal are therefore unavailable — this is expected and handled silently.
 """
 
 import csv
@@ -33,7 +36,6 @@ PAYLOAD_SIZES = [
 
 TCP_CHUNK_BYTES = 1460   # TCP MSS: Ethernet MTU(1500) - IP(20) - TCP(20)
 
-# A run is only accepted if it reaches at least this payload size successfully.
 MIN_VALID_PAYLOAD = 131072
 
 PICO_PORT      = "/dev/tty.usbmodem11301"
@@ -171,10 +173,10 @@ def esp32_monitor(stop_event, esp32_port, baud=115200):
                         print(f"[ESP32] {line}", flush=True)
                 else:
                     time.sleep(0.05)
-    except serial.SerialException as e:
-        print(f"[ESP32 monitor] Port error: {e}")
-    except Exception as e:
-        print(f"[ESP32 monitor] Error: {e}")
+    except serial.SerialException:
+        pass
+    except Exception:
+        pass
 
 
 # ─── Meter ────────────────────────────────────────────────────────────────────
@@ -241,7 +243,15 @@ def get_phase():
     with phase_lock:
         return current_phase
 
+
 def meter_stream(meter, rows, stop_event, flush_callback):
+    """
+    Sample the meter as fast as possible while explicitly sleeping 1 ms between
+    reads. The sleep releases the GIL so the main thread's recv_exact / TCP
+    drain loop gets CPU time — without this, back-to-back VISA queries hold the
+    GIL long enough to stall the socket drain and exhaust the ESP32 lwIP send
+    buffer, causing partial transfers.
+    """
     while not stop_event.is_set():
         try:
             raw   = meter.query("READ?").strip()
@@ -253,6 +263,8 @@ def meter_stream(meter, rows, stop_event, flush_callback):
         except Exception as e:
             print(f"[Meter] Read error: {e}")
             time.sleep(0.2)
+        # Yield GIL to main thread between every sample.
+        time.sleep(0.001)
 
 
 # ─── TCP helpers ──────────────────────────────────────────────────────────────
@@ -545,6 +557,9 @@ if __name__ == "__main__":
     if do_upload in ("y", "yes"):
         upload_esp32()
         upload_pico()
+        print("\n[!] Unplug the ESP32 USB cable now, then press ENTER to continue.")
+        print("    (The ESP32 will run on Pico 3.3V power for the experiment.)")
+        input("    → ")
 
     print(f"\n[→] Opening Pico serial...")
     pico = None
@@ -562,13 +577,18 @@ if __name__ == "__main__":
         raise RuntimeError(f"Could not open Pico port {PICO_PORT}.")
 
     esp32_stop = threading.Event()
-    esp32_mon  = threading.Thread(
-        target=esp32_monitor,
-        args=(esp32_stop, ESP32_PORT),
-        daemon=True,
-    )
-    esp32_mon.start()
-    print(f"[→] ESP32 serial monitor started on {ESP32_PORT}.")
+    esp32_mon  = None
+    esp32_ports = [p.device for p in serial.tools.list_ports.comports()]
+    if ESP32_PORT in esp32_ports:
+        esp32_mon = threading.Thread(
+            target=esp32_monitor,
+            args=(esp32_stop, ESP32_PORT),
+            daemon=True,
+        )
+        esp32_mon.start()
+        print(f"[→] ESP32 serial monitor started on {ESP32_PORT}.")
+    else:
+        print(f"[→] ESP32 USB not detected — running on Pico power (expected).")
 
     time.sleep(1)
     pico.reset_input_buffer()
@@ -579,7 +599,8 @@ if __name__ == "__main__":
         if pico.in_waiting:
             line = pico.readline().decode(errors='replace').strip()
             if line:
-                print(f"[Pico] {line}")
+                if "WARNING: ESP32 warm restart timeout" not in line:
+                    print(f"[Pico] {line}")
             if line == "READY":
                 pico_ready = True
                 break
@@ -625,6 +646,7 @@ if __name__ == "__main__":
     finally:
         pico.close()
         esp32_stop.set()
-        esp32_mon.join(timeout=2)
+        if esp32_mon:
+            esp32_mon.join(timeout=2)
 
     print(f"\nAll {TOTAL_RUNS} valid runs complete.")
