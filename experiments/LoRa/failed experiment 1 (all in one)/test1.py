@@ -218,9 +218,9 @@ def run_experiment(run_number, meter, pico):
         try:
             result = send_lora_payload(pico, size, i)
 
-            print(f"  [✓] {size}B in {result['duration_ms']:.1f} ms")
+            print(f"  [✓] {size}B in {result['duration_ms']:.1f} ms") 
 
-            w.writerow([size, result["duration_ms"], result["success"]])
+            w.writerow([size, result["duration_ms"], result["success"]]) #mildly annoying for later data processing could write it into events?
             csv_file.flush()
 
         except Exception as e:
