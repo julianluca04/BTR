@@ -31,9 +31,6 @@ void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   }
 }
 
-// Write all bytes without flush() inside the loop.
-// setNoDelay(true) handles immediate delivery; flush() inside blocks the CPU
-// and causes UART RX buffer overflow on large payloads.
 bool writeAll(WiFiClient &client, const uint8_t *buf, int len) {
   int sent = 0;
   unsigned long deadline = millis() + 15000UL;
@@ -71,9 +68,6 @@ void setup() {
   Serial.println(WiFi.softAPIP());
   Serial.println("[ESP32] Waiting for Mac to connect to AP...");
 
-  // Block here until the Mac has joined the AP and received a DHCP lease.
-  // Only then signal the Pico to start — this ensures apReady is true for
-  // every payload including the very first one after a cold boot or restart.
   while (!apReady) delay(50);
 
   Serial.println("[ESP32] Mac connected. Signalling Pico to boot.");
@@ -105,8 +99,6 @@ void loop() {
   Serial.print("B  heap=");
   Serial.println(ESP.getFreeHeap());
 
-  // If the Mac briefly disconnected and reconnected between payloads,
-  // wait up to 5 s for apReady to come back before giving up.
   if (!apReady) {
     Serial.println("[ESP32] Waiting for client IP...");
     unsigned long t = millis();
@@ -129,12 +121,15 @@ void loop() {
   }
   Serial.println("[ESP32] TCP connected.");
 
+  // Tell Pico TCP is open — Pico waits for this before sending the first chunk.
+  picoSerial.println("TCPOK");
+
   client.print("SIZE:" + String(payloadSize) + "\n");
 
   long          forwarded  = 0;
   int           chunkCount = 0;
   unsigned long lastByte   = millis();
-  const unsigned long BYTE_TIMEOUT_MS = 2000;
+  const unsigned long BYTE_TIMEOUT_MS = 5000;
   bool          tcpFailed  = false;
 
   while (forwarded < payloadSize) {
@@ -174,6 +169,8 @@ void loop() {
       Serial.print("/");
       Serial.println(payloadSize);
       chunkCount = 0;
+      // ACK this chunk so Pico sends the next one.
+      if (forwarded < payloadSize) picoSerial.println("CHUNKACK");
     }
   }
 

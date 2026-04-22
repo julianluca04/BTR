@@ -8,16 +8,11 @@ const long PAYLOAD_SIZES[NUM_PAYLOADS] = {
   1024, 2048, 4096, 8192, 16384, 32768, 65536,
   131072, 262144, 524288
 };
-const int SETTLE_MS             = 1000;
-const int START_DELAY_MS        = 500;
-const int CHUNK_SIZE            = 1460;
-const int ESP32_BOOT_TIMEOUT    = 15000;
-const int INTER_CHUNK_DELAY_MS  = 10;
-
-// Wait after sending the size line before blasting payload bytes.
-// Must cover: ESP32 parsing size + apReady check + client.connect() (~200 ms).
-// 800 ms gives comfortable headroom after a post-run restart.
-const int TCP_CONNECT_WAIT_MS = 800;
+const int SETTLE_MS          = 1000;
+const int START_DELAY_MS     = 500;
+const int CHUNK_SIZE         = 1460;
+const int ESP32_BOOT_TIMEOUT = 15000;
+const int CHUNK_ACK_TIMEOUT  = 10000;  // ms to wait for TCPOK or CHUNKACK
 
 bool started = false;
 
@@ -55,18 +50,31 @@ bool waitForESP32Boot() {
   return false;
 }
 
+// Wait for a specific message from ESP32 over UART.
+// Returns true if received, false on timeout or if "FAIL" received.
+bool waitForESP32Msg(const char* expected, bool &failed) {
+  unsigned long t = millis();
+  while (millis() - t < CHUNK_ACK_TIMEOUT) {
+    if (Serial1.available()) {
+      String msg = Serial1.readStringUntil('\n');
+      msg.trim();
+      if (msg == expected) return true;
+      if (msg == "FAIL")   { failed = true; return false; }
+    }
+    delay(1);
+  }
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
   Serial1.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   delay(2000);
 
-  // Drain anything the ESP32 may have sent during cold boot.
   delay(3000);
   while (Serial1.available()) Serial1.read();
 
-  // Unconditionally force a warm restart so every run starts from a consistent
-  // post-restart heap state regardless of cold-boot timing.
   Serial.println("[Pico] Forcing ESP32 warm restart...");
   Serial1.println("DONE");
 
@@ -106,25 +114,45 @@ void loop() {
     long size  = PAYLOAD_SIZES[i];
     char digit = '0' + (i % 10);
 
-    // Send size line then wait for ESP32 to open TCP connection.
+    // Send size to ESP32, wait for TCPOK before sending any bytes.
     Serial1.println(size);
-    delay(TCP_CONNECT_WAIT_MS);
-    // Drain any stale bytes (e.g. lingering OK from previous payload).
-    while (Serial1.available()) Serial1.read();
+    bool failed = false;
+    if (!waitForESP32Msg("TCPOK", failed) || failed) {
+      Serial.print("ESP32_FAIL ");
+      Serial.println(size);
+      waitForAckOrSkip(skipRun);
+      skipRun = true;
+      continue;
+    }
 
     static uint8_t sendBuf[CHUNK_SIZE];
     memset(sendBuf, (uint8_t)digit, CHUNK_SIZE);
 
-    long sent = 0;
+    long sent     = 0;
+    bool chunkErr = false;
     while (sent < size) {
       int chunkBytes = (int)min((long)CHUNK_SIZE, size - sent);
       Serial1.write(sendBuf, chunkBytes);
       sent += chunkBytes;
-      // Brief inter-chunk gap prevents the ESP32 UART RX buffer from filling
-      // faster than it drains into TCP. Skip delay after the last chunk.
-      if (sent < size) delay(INTER_CHUNK_DELAY_MS);
+
+      // After each chunk (except the last), wait for CHUNKACK before continuing.
+      if (sent < size) {
+        if (!waitForESP32Msg("CHUNKACK", failed) || failed) {
+          chunkErr = true;
+          break;
+        }
+      }
     }
 
+    if (chunkErr) {
+      Serial.print("ESP32_FAIL ");
+      Serial.println(size);
+      waitForAckOrSkip(skipRun);
+      skipRun = true;
+      continue;
+    }
+
+    // Wait for final OK/FAIL after last chunk.
     String esp32Response = "";
     unsigned long t = millis();
     while (millis() - t < 120000) {
