@@ -4,25 +4,55 @@ BTR Experiment Analysis Script
 Reads all CSVs from the `analyze_data/` folder (placed alongside this script),
 validates experiment consistency, and produces per-experiment-group plots.
 
-Filename convention expected:
-    <module>_<strategy>_run<NN>.csv
-    e.g.  ble_nrf52_full_payload_run01.csv
-          wifi_esp32c3_chunked_run03.csv
-          lora_rn2903_windowed_run12.csv
+Filename convention:
+    <module>_<strategy>_run<NN>.csv       e.g. ble_nrf52_full_payload_run01.csv
+    shortcircuit.csv                      zero-offset calibration run (probes shorted)
+
+SHORT-CIRCUIT CALIBRATION
+--------------------------
+Place a file named `shortcircuit.csv` in the `analyze_data/` folder.
+It must have the same CSV format as experiment files (# METER block with
+timestamp, v_shunt, phase columns). Phase labels are ignored — all samples
+are treated as zero-input readings.
+
+From this file the script computes:
+    mu_offset   – mean voltage when input = 0 V  (systematic bias)
+    sigma_noise – SD of those readings            (random noise floor)
+
+Every v_shunt reading in experiment files is then corrected:
+    v_corrected = v_measured - mu_offset
+
+Total voltage uncertainty per sample (1-sigma, combined in quadrature):
+    sigma_v = sqrt(sigma_noise^2 + sigma_instrument^2)
+
+where sigma_instrument comes from the HMC8012 DC voltage spec:
+    ±(0.05% of reading + 0.005% of range)
+    Range used: 600 mV  ->  sigma_instrument per sample varies with reading.
+
+This propagates to current uncertainty:
+    sigma_I = sigma_v / R_shunt   [in mA]
+
+And to energy uncertainty via the trapezoidal rule:
+    sigma_E = sqrt( sum_i( (dt_i * sigma_P_i)^2 ) )   [in mJ]
+where sigma_P_i = sigma_I_i * V_supply.
+
+Any payload phase whose mean current is below SNR_THRESHOLD * sigma_I_floor
+is flagged as UNRELIABLE in the summary CSV and marked on plots.
 
 Outputs (saved to analyze_data/plots/):
-    <module>_<strategy>_mean_power_per_run.png         – mean active power (mW) per run
-    <module>_<strategy>_total_energy_per_run.png       – total energy across all payloads per run (mJ)
-    <module>_<strategy>_run_duration_per_payload.png   – boxplot of tx duration per payload size
-    <module>_<strategy>_energy_per_payload.png         – mean±SD energy (mJ) vs payload size
-    <module>_<strategy>_efficiency_per_payload.png     – mean±SD energy efficiency (mJ/KB) vs payload size
-    <module>_<strategy>_current_trace_overlay.png      – overlaid current traces (first 10 runs)
-    <module>_<strategy>_baseline_stability.png         – baseline current stability across runs
-    <module>_<strategy>_summary.csv                    – tidy flat CSV for further analysis
+    shortcircuit_noise_floor.png           – noise floor characterisation plot
+    <module>_<strategy>_mean_power_per_run.png
+    <module>_<strategy>_total_energy_per_run.png
+    <module>_<strategy>_run_duration_per_payload.png
+    <module>_<strategy>_energy_per_payload.png
+    <module>_<strategy>_efficiency_per_payload.png
+    <module>_<strategy>_current_trace_overlay.png
+    <module>_<strategy>_baseline_stability.png
+    <module>_<strategy>_summary.csv
 
-NOTE on statistics:
-    All standard deviations use ddof=1 (sample SD, not population SD), appropriate
-    because the 30 runs are a sample from a larger hypothetical population of runs.
+STATISTICS NOTE
+    Cross-run SD uses ddof=1 (sample SD).
+    Within-run SD uses pandas default (also ddof=1).
 """
 
 import re
@@ -40,26 +70,144 @@ SCRIPT_DIR    = Path(__file__).parent
 DATA_DIR      = SCRIPT_DIR / "analyze_data"
 PLOTS_DIR     = DATA_DIR / "plots"
 REQUIRED_RUNS = 30
-V_SUPPLY      = 3.3    # V  (fallback if not in CSV meta)
-SHUNT_DEFAULT = 1.13   # Ω  (your measured value; overridden by meta if present)
+V_SUPPLY      = 5.013517   # V   (measured; overridden by CSV meta if present)
+SHUNT_DEFAULT = 1.131667   # Ohm (measured; overridden by CSV meta if present)
+
+# HMC8012 DC voltage spec
+HMC8012_READING_PCT = 0.0005   # 0.05% of reading
+HMC8012_RANGE_PCT   = 0.00005  # 0.005% of range
+HMC8012_RANGE_V     = 0.600    # 600 mV range (appropriate for shunt voltages)
+
+# Signal-to-noise threshold: phases with mean current < this multiple of the
+# noise floor current are flagged as unreliable
+SNR_THRESHOLD = 3.0
 
 
 # ── Colour helper ─────────────────────────────────────────────────────────────
 def _cmap(name, n):
-    """Matplotlib-version-safe colormap fetch."""
     try:
         return plt.colormaps[name].resampled(n)
     except AttributeError:
         return cm.get_cmap(name, n)
 
 
+# ── Instrument uncertainty (HMC8012 spec) ─────────────────────────────────────
+def _sigma_instrument_V(v_reading: float) -> float:
+    """
+    1-sigma voltage uncertainty from HMC8012 DC spec:
+        ±(0.05% of reading + 0.005% of range)
+    Treated as a rectangular distribution -> divide by sqrt(3) for 1-sigma.
+    """
+    half_width = (HMC8012_READING_PCT * abs(v_reading)
+                  + HMC8012_RANGE_PCT * HMC8012_RANGE_V)
+    return half_width / np.sqrt(3)
+
+
+# ── Short-circuit calibration ─────────────────────────────────────────────────
+def load_noise_floor(data_dir: Path, plots_dir: Path) -> dict:
+    """
+    Reads shortcircuit.csv, computes offset and noise floor, saves a
+    diagnostic plot, and returns a dict:
+        mu_offset_V    – mean shunt voltage with probes shorted (V)
+        sigma_noise_V  – SD of those readings (V)
+        sigma_floor_V  – combined noise floor per sample (noise + instrument)
+        sigma_I_floor_mA – noise floor expressed as current (mA)
+        n_samples      – number of samples used
+    If the file is not found, returns None and prints a warning.
+    """
+    sc_path = data_dir / "shortcircuit.csv"
+    if not sc_path.exists():
+        print("  [WARN] shortcircuit.csv not found in analyze_data/.")
+        print("         Uncertainty correction will use instrument spec only.")
+        print("         To enable full correction: short the probes, record a")
+        print("         CSV run, name it shortcircuit.csv, place it in analyze_data/.")
+        return None
+
+    # Parse meter block (reuse same format as experiment files)
+    rows = []
+    in_meter = False
+    with open(sc_path, encoding='utf-8') as fh:
+        for raw in fh:
+            line = raw.strip()
+            if line == '# METER':
+                in_meter = True; continue
+            if in_meter and line and not line.startswith('timestamp'):
+                parts = line.split(',')
+                if len(parts) >= 2:
+                    rows.append(parts[1])   # v_shunt column only
+
+    if not rows:
+        print("  [WARN] shortcircuit.csv has no meter data. Skipping calibration.")
+        return None
+
+    voltages = pd.to_numeric(pd.Series(rows), errors='coerce').dropna().values
+    n = len(voltages)
+
+    mu    = float(np.mean(voltages))
+    sigma = float(np.std(voltages, ddof=1))
+
+    # Representative instrument uncertainty at near-zero reading
+    sigma_inst = _sigma_instrument_V(mu)
+
+    # Combined noise floor (in quadrature)
+    sigma_floor = np.sqrt(sigma**2 + sigma_inst**2)
+
+    # Convert to current
+    sigma_I_floor_mA = (sigma_floor / SHUNT_DEFAULT) * 1e3
+
+    print(f"  [Calibration] n={n} samples")
+    print(f"    Offset  mu  = {mu*1e3:+.4f} mV  ({mu:.6f} V)")
+    print(f"    Noise  sigma= {sigma*1e3:.4f} mV  (random, ddof=1)")
+    print(f"    Instrument  = {sigma_inst*1e3:.4f} mV  (HMC8012 spec)")
+    print(f"    Combined floor = {sigma_floor*1e3:.4f} mV  -> {sigma_I_floor_mA:.4f} mA")
+    print(f"    Reliable signal threshold (>{SNR_THRESHOLD}x floor): "
+          f"{SNR_THRESHOLD * sigma_I_floor_mA:.4f} mA")
+
+    # ── Diagnostic plot ──
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    ax = axes[0]
+    ax.plot(voltages * 1e3, linewidth=0.6, color='steelblue', alpha=0.7)
+    ax.axhline(mu * 1e3,           color='tomato',       linestyle='--', linewidth=1.2,
+               label=f'Mean = {mu*1e3:+.4f} mV')
+    ax.axhline((mu + sigma) * 1e3, color='orange',       linestyle=':',  linewidth=1.0,
+               label=f'+1 SD = {sigma*1e3:.4f} mV')
+    ax.axhline((mu - sigma) * 1e3, color='orange',       linestyle=':',  linewidth=1.0)
+    ax.set_xlabel('Sample #')
+    ax.set_ylabel('Shunt Voltage (mV)')
+    ax.set_title('Short-Circuit Run: Raw Readings')
+    ax.legend(fontsize=8)
+
+    ax = axes[1]
+    ax.hist(voltages * 1e3, bins=40, color='steelblue', edgecolor='white',
+            linewidth=0.4, density=True)
+    ax.axvline(mu * 1e3,           color='tomato', linestyle='--', linewidth=1.5,
+               label=f'Mean offset = {mu*1e3:+.4f} mV')
+    ax.axvline((mu + sigma_floor) * 1e3, color='orange', linestyle=':', linewidth=1.2,
+               label=f'Combined floor = {sigma_floor*1e3:.4f} mV')
+    ax.axvline((mu - sigma_floor) * 1e3, color='orange', linestyle=':', linewidth=1.2)
+    ax.set_xlabel('Shunt Voltage (mV)')
+    ax.set_ylabel('Density')
+    ax.set_title('Short-Circuit Voltage Distribution')
+    ax.legend(fontsize=8)
+
+    fig.suptitle(f'Noise Floor Characterisation  |  n={n} samples  |  '
+                 f'Floor = {sigma_floor*1e3:.4f} mV = {sigma_I_floor_mA:.4f} mA',
+                 fontsize=10)
+    fig.tight_layout()
+    _save(fig, plots_dir, "shortcircuit_noise_floor.png")
+
+    return {
+        'mu_offset_V':       mu,
+        'sigma_noise_V':     sigma,
+        'sigma_floor_V':     sigma_floor,
+        'sigma_I_floor_mA':  sigma_I_floor_mA,
+        'n_samples':         n,
+    }
+
+
 # ── Filename parsing ──────────────────────────────────────────────────────────
 def parse_filename(path: Path):
-    """
-    Returns (module, strategy, run_number) or None.
-    Pattern: <module>_<strategy>_run<NN>.csv
-    First two underscore-tokens -> module, remaining tokens before _run<NN> -> strategy.
-    """
     stem = path.stem
     m = re.match(r'^(.+)_(run\d+)$', stem)
     if not m:
@@ -75,10 +223,15 @@ def parse_filename(path: Path):
 
 
 # ── CSV parser ────────────────────────────────────────────────────────────────
-def parse_csv(path: Path):
+def parse_csv(path: Path, noise: dict | None):
     """
-    Parse a BTR CSV file into meta dict, events DataFrame, and meter DataFrame.
-    Meter columns: timestamp, v_shunt, phase, current_mA, power_mW, elapsed_s
+    Parse a BTR CSV file.
+    If noise is provided:
+      - v_shunt is corrected by subtracting mu_offset
+      - per-sample voltage uncertainty is computed and propagated to current & power
+    Meter columns added: current_mA, power_mW, elapsed_s,
+                         sigma_I_mA (per-sample 1-sigma current uncertainty),
+                         sigma_P_mW (per-sample 1-sigma power uncertainty)
     """
     meta, events_rows, meter_rows = {}, [], []
     section, events_header = None, None
@@ -122,11 +275,29 @@ def parse_csv(path: Path):
         shunt = float(meta.get('shunt_ohms', SHUNT_DEFAULT))
         v_sup = float(meta.get('v_supply',   V_SUPPLY))
 
-        # I = V_shunt / R_shunt  (result in A, *1e3 -> mA)
+        # ── Offset correction ──
+        if noise is not None:
+            meter_df['v_shunt'] = meter_df['v_shunt'] - noise['mu_offset_V']
+
+        # ── Derived quantities ──
         meter_df['current_mA'] = (meter_df['v_shunt'] / shunt) * 1e3
-        # P = I * V_supply  (mA * V = mW)
         meter_df['power_mW']   = meter_df['current_mA'] * v_sup
-        meter_df['elapsed_s']  = (
+
+        # ── Per-sample uncertainty propagation ──
+        if noise is not None:
+            # sigma_v combines noise floor and instrument spec per sample
+            sigma_v = np.sqrt(
+                noise['sigma_noise_V']**2
+                + meter_df['v_shunt'].apply(_sigma_instrument_V).values**2
+            )
+        else:
+            # instrument spec only
+            sigma_v = meter_df['v_shunt'].apply(_sigma_instrument_V).values
+
+        meter_df['sigma_I_mA'] = (sigma_v / shunt) * 1e3
+        meter_df['sigma_P_mW'] = meter_df['sigma_I_mA'] * v_sup
+
+        meter_df['elapsed_s'] = (
             meter_df['timestamp'] - meter_df['timestamp'].iloc[0]
         ).dt.total_seconds()
     else:
@@ -137,17 +308,11 @@ def parse_csv(path: Path):
 
 # ── Validation ────────────────────────────────────────────────────────────────
 def validate_group(group_key, file_list, parsed_list):
-    """
-    Checks: (1) exactly REQUIRED_RUNS files, (2) no duplicate run numbers,
-    (3) consistent payload phase set across all runs.
-    Returns True if all pass.
-    """
     module, strategy = group_key
     label = f"{module} / {strategy}"
     ok = True
 
     run_nums = [info['run'] for info in file_list]
-
     if len(run_nums) != REQUIRED_RUNS:
         print(f"  [WARN] {label}: expected {REQUIRED_RUNS} runs, found {len(run_nums)}")
         ok = False
@@ -177,49 +342,59 @@ def validate_group(group_key, file_list, parsed_list):
     return ok
 
 
-# ── Energy integration ────────────────────────────────────────────────────────
-def _trapz_energy_mJ(grp: pd.DataFrame) -> float:
+# ── Energy integration with uncertainty ──────────────────────────────────────
+def _trapz_energy_and_uncertainty(grp: pd.DataFrame):
     """
-    Trapezoidal integration of power_mW over real sample timestamps.
-    Units: mW * s = mJ  (no further conversion needed).
+    Trapezoidal energy integral (mJ) and propagated 1-sigma uncertainty (mJ).
+
+    Energy:
+        E = sum_i( (P_i + P_{i+1})/2 * dt_i )      [mW * s = mJ]
+
+    Uncertainty propagation (independent samples, in quadrature):
+        dE/dP_i = (dt_{i-1} + dt_i) / 2  for interior points
+        dE/dP_0 = dt_0 / 2,   dE/dP_N = dt_{N-1} / 2
+        sigma_E = sqrt( sum_i( (dE/dP_i * sigma_P_i)^2 ) )
     """
     dt = np.diff(grp['timestamp'].values.astype(np.int64)) / 1e9  # ns -> s
+    pw = grp['power_mW'].values
+    sp = grp['sigma_P_mW'].values
+
     if len(dt) == 0:
-        # Single sample fallback: assume ~3 ms typical meter interval
-        return float(grp['power_mW'].iloc[0] * 0.003)
-    pw_mid = (grp['power_mW'].values[:-1] + grp['power_mW'].values[1:]) / 2.0
-    return float(np.sum(pw_mid * dt))
+        energy = float(pw[0] * 0.003)
+        sigma  = float(sp[0] * 0.003)
+        return energy, sigma
+
+    # midpoint power for trapezoid
+    pw_mid = (pw[:-1] + pw[1:]) / 2.0
+    energy = float(np.sum(pw_mid * dt))
+
+    # sensitivity of E to each power sample
+    sens = np.zeros(len(pw))
+    sens[0]  = dt[0] / 2.0
+    sens[-1] = dt[-1] / 2.0
+    for i in range(1, len(pw) - 1):
+        sens[i] = (dt[i-1] + dt[i]) / 2.0
+
+    sigma = float(np.sqrt(np.sum((sens * sp)**2)))
+    return energy, sigma
 
 
 # ── Per-run summary ───────────────────────────────────────────────────────────
-def summarise_run(parsed, run_num):
+def summarise_run(parsed, run_num, noise: dict | None):
     """
-    Returns a summary dict for one run.
-
-    mean_power_active_mW:
-        Energy-weighted mean power = total_energy_mJ / total_duration_s.
-        This is the correct single-number power summary: it avoids over-weighting
-        short low-energy payload phases relative to long high-energy ones.
-        It equals what you'd get from integrating the entire active waveform
-        and dividing by its duration.
-
-    total_energy_mJ:
-        Sum of per-payload energies across ALL payload sizes in this run.
-        Gives a single "how much did this module consume in this entire experiment run" figure.
-
-    payload_stats per-entry:
-        energy_mJ          – trapezoidal integral over that payload's tx phase (mJ)
-        efficiency_mJ_per_KB – energy_mJ / (payload_bytes / 1024)
-                               lower = more efficient per byte transferred
+    Summarise a single run. Returns dict with per-payload stats including
+    energy uncertainty and SNR flag.
     """
     meter = parsed['meter']
     if meter.empty:
         return None
 
+    # Noise floor current (for SNR check)
+    sigma_I_floor = noise['sigma_I_floor_mA'] if noise else 0.0
+
     baseline_df   = meter[meter['phase'] == 'baseline']
     baseline_mean = baseline_df['current_mA'].mean()
-    # pandas .std() defaults to ddof=1 (sample SD) -- correct for within-run noise
-    baseline_std  = baseline_df['current_mA'].std()
+    baseline_std  = baseline_df['current_mA'].std()   # ddof=1 via pandas
 
     tx_mask = meter['phase'].str.startswith('tx_')
 
@@ -228,30 +403,45 @@ def summarise_run(parsed, run_num):
         grp        = grp.reset_index(drop=True)
         size_bytes = int(phase_label.split('_')[1])
         duration_s = (grp['timestamp'].iloc[-1] - grp['timestamp'].iloc[0]).total_seconds()
-        energy_mJ  = _trapz_energy_mJ(grp)
-        mean_pw    = grp['power_mW'].mean()
-        size_kb    = size_bytes / 1024.0
-        efficiency = energy_mJ / size_kb if size_kb > 0 else np.nan
+
+        energy_mJ, sigma_E_mJ = _trapz_energy_and_uncertainty(grp)
+
+        mean_pw      = grp['power_mW'].mean()
+        mean_I       = grp['current_mA'].mean()
+        size_kb      = size_bytes / 1024.0
+        efficiency   = energy_mJ / size_kb if size_kb > 0 else np.nan
+        eff_sigma    = sigma_E_mJ / size_kb if size_kb > 0 else np.nan
+
+        # SNR: is the mean current distinguishable from the noise floor?
+        snr          = mean_I / sigma_I_floor if sigma_I_floor > 0 else np.inf
+        unreliable   = snr < SNR_THRESHOLD
 
         payload_stats.append({
             'payload_bytes':        size_bytes,
             'duration_s':           duration_s,
             'mean_power_mW':        mean_pw,
+            'mean_current_mA':      mean_I,
             'energy_mJ':            energy_mJ,
+            'sigma_energy_mJ':      sigma_E_mJ,
             'efficiency_mJ_per_KB': efficiency,
+            'sigma_eff_mJ_per_KB':  eff_sigma,
+            'snr':                  snr,
+            'unreliable':           unreliable,
         })
 
     payload_stats.sort(key=lambda x: x['payload_bytes'])
 
     total_energy_mJ  = sum(ps['energy_mJ']  for ps in payload_stats)
     total_duration_s = sum(ps['duration_s'] for ps in payload_stats)
-    mean_power_active = (total_energy_mJ / total_duration_s
-                         if total_duration_s > 0 else np.nan)
+    # Propagate total energy uncertainty in quadrature across payload phases
+    total_sigma_E    = float(np.sqrt(sum(ps['sigma_energy_mJ']**2 for ps in payload_stats)))
+    mean_power_active = total_energy_mJ / total_duration_s if total_duration_s > 0 else np.nan
 
     return {
         'run':                  run_num,
         'mean_power_active_mW': mean_power_active,
         'total_energy_mJ':      total_energy_mJ,
+        'total_sigma_E_mJ':     total_sigma_E,
         'baseline_mean_mA':     baseline_mean,
         'baseline_std_mA':      baseline_std,
         'payload_stats':        payload_stats,
@@ -261,13 +451,12 @@ def summarise_run(parsed, run_num):
 
 # ── Shared plot helpers ───────────────────────────────────────────────────────
 def _size_label(sz):
-    if sz < 1024:          return f'{sz}B'
-    elif sz < 1024**2:     return f'{sz // 1024}KB'
-    else:                  return f'{sz // 1024**2}MB'
+    if sz < 1024:      return f'{sz}B'
+    elif sz < 1024**2: return f'{sz // 1024}KB'
+    else:              return f'{sz // 1024**2}MB'
 
 
 def _collect(summaries, key):
-    """dict: payload_bytes -> list of metric values across all runs."""
     d = defaultdict(list)
     for s in summaries:
         for ps in s['payload_stats']:
@@ -275,20 +464,51 @@ def _collect(summaries, key):
     return d
 
 
-def _errorbar_plot(ax, sizes, payload_data, ylabel, title):
+def _unreliable_sizes(summaries):
+    """Return set of payload sizes flagged as unreliable in ANY run."""
+    bad = set()
+    for s in summaries:
+        for ps in s['payload_stats']:
+            if ps['unreliable']:
+                bad.add(ps['payload_bytes'])
+    return bad
+
+
+def _errorbar_plot(ax, sizes, payload_data, ylabel, title, unreliable=None):
     """
-    Scatter of individual run values + mean ± 1 SD (ddof=1) error bars.
-    Used for energy and efficiency plots.
+    Per-run scatter + mean ± 1 SD error bars.
+    Unreliable payload sizes (below SNR threshold) are shown in grey
+    with a hatched background and labelled.
     """
+    unreliable = unreliable or set()
     x     = np.arange(len(sizes))
     means = [np.mean(payload_data[sz])        for sz in sizes]
-    stds  = [np.std(payload_data[sz], ddof=1) for sz in sizes]  # sample SD
+    stds  = [np.std(payload_data[sz], ddof=1) for sz in sizes]
 
     for i, sz in enumerate(sizes):
+        colour = 'lightgrey' if sz in unreliable else 'steelblue'
         ax.scatter([i] * len(payload_data[sz]), payload_data[sz],
-                   color='steelblue', alpha=0.30, s=12, zorder=2)
-    ax.errorbar(x, means, yerr=stds, fmt='o-', color='tomato',
-                linewidth=1.5, capsize=4, zorder=3, label='Mean ± 1 SD (n=30)')
+                   color=colour, alpha=0.40, s=12, zorder=2)
+        if sz in unreliable:
+            ax.axvspan(i - 0.4, i + 0.4, color='lightyellow',
+                       alpha=0.6, zorder=1, linewidth=0)
+
+    reliable_x     = [x[i] for i, sz in enumerate(sizes) if sz not in unreliable]
+    reliable_means = [means[i] for i, sz in enumerate(sizes) if sz not in unreliable]
+    reliable_stds  = [stds[i]  for i, sz in enumerate(sizes) if sz not in unreliable]
+    unreliable_x   = [x[i] for i, sz in enumerate(sizes) if sz in unreliable]
+    unreliable_m   = [means[i] for i, sz in enumerate(sizes) if sz in unreliable]
+    unreliable_s   = [stds[i]  for i, sz in enumerate(sizes) if sz in unreliable]
+
+    if reliable_x:
+        ax.errorbar(reliable_x, reliable_means, yerr=reliable_stds,
+                    fmt='o-', color='tomato', linewidth=1.5, capsize=4,
+                    zorder=3, label='Mean +/- 1 SD (n=30)')
+    if unreliable_x:
+        ax.errorbar(unreliable_x, unreliable_m, yerr=unreliable_s,
+                    fmt='s--', color='grey', linewidth=1.0, capsize=4,
+                    zorder=3, label='Mean +/- 1 SD (below SNR threshold)')
+
     ax.set_xticks(x)
     ax.set_xticklabels([_size_label(sz) for sz in sizes],
                        rotation=45, ha='right', fontsize=8)
@@ -307,11 +527,6 @@ def _save(fig, out_dir, fname):
 # ── Plot functions ────────────────────────────────────────────────────────────
 
 def plot_mean_power_per_run(summaries, module, strategy, out_dir):
-    """
-    Bar chart of energy-weighted mean active power (mW) per run.
-    = total_energy_mJ / total_duration_s for each run.
-    Shows whether power draw is consistent across runs.
-    """
     runs  = [s['run']                  for s in summaries]
     power = [s['mean_power_active_mW'] for s in summaries]
     grand = np.nanmean(power)
@@ -322,7 +537,7 @@ def plot_mean_power_per_run(summaries, module, strategy, out_dir):
                label=f'Mean = {grand:.2f} mW')
     ax.set_xlabel('Run #')
     ax.set_ylabel('Mean Active Power (mW)')
-    ax.set_title(f'{module.upper()} · {strategy} — Energy-Weighted Mean Active Power per Run')
+    ax.set_title(f'{module.upper()} / {strategy} -- Energy-Weighted Mean Active Power per Run')
     ax.set_xticks(runs)
     ax.set_xticklabels([str(r) for r in runs], fontsize=7, rotation=45)
     ax.legend()
@@ -331,86 +546,95 @@ def plot_mean_power_per_run(summaries, module, strategy, out_dir):
 
 
 def plot_total_energy_per_run(summaries, module, strategy, out_dir):
-    """
-    Bar chart of total energy consumed (mJ) in each run (all payload sizes summed).
-    Shows experiment-level consumption variability across runs.
-    """
     runs   = [s['run']             for s in summaries]
     totals = [s['total_energy_mJ'] for s in summaries]
+    sigmas = [s['total_sigma_E_mJ'] for s in summaries]
     grand  = np.nanmean(totals)
-    sd     = np.nanstd(totals, ddof=1)  # sample SD across runs
+    sd     = np.nanstd(totals, ddof=1)
 
     fig, ax = plt.subplots(figsize=(12, 4))
-    ax.bar(runs, totals, color='mediumseagreen', edgecolor='white', linewidth=0.5)
+    ax.bar(runs, totals, color='mediumseagreen', edgecolor='white', linewidth=0.5,
+           label='Total energy per run')
+    ax.errorbar(runs, totals, yerr=sigmas, fmt='none', color='black',
+                capsize=3, linewidth=1.0, label='Measurement uncertainty (1 sigma)')
     ax.axhline(grand, color='tomato', linestyle='--', linewidth=1.2,
                label=f'Mean = {grand:.1f} mJ  (SD = {sd:.1f} mJ)')
     ax.set_xlabel('Run #')
     ax.set_ylabel('Total Energy (mJ)')
-    ax.set_title(f'{module.upper()} · {strategy} — Total Energy per Run (all payload sizes summed)')
+    ax.set_title(f'{module.upper()} / {strategy} -- Total Energy per Run (all payload sizes summed)')
     ax.set_xticks(runs)
     ax.set_xticklabels([str(r) for r in runs], fontsize=7, rotation=45)
-    ax.legend()
+    ax.legend(fontsize=8)
     fig.tight_layout()
     _save(fig, out_dir, f"{module}_{strategy}_total_energy_per_run.png")
 
 
 def plot_run_duration_per_payload(summaries, module, strategy, out_dir):
-    """
-    Box plot: distribution (across 30 runs) of TX phase duration per payload size.
-    Reveals timing variability — e.g. wireless connection/negotiation jitter.
-    """
     payload_data = _collect(summaries, 'duration_s')
     sizes = sorted(payload_data.keys())
     data  = [payload_data[sz] for sz in sizes]
+    unreliable = _unreliable_sizes(summaries)
 
     fig, ax = plt.subplots(figsize=(max(10, len(sizes) * 0.85), 5))
     bp = ax.boxplot(data, patch_artist=True,
                     medianprops=dict(color='tomato', linewidth=1.5))
-    for patch in bp['boxes']:
-        patch.set_facecolor('lightsteelblue')
+    for i, (patch, sz) in enumerate(zip(bp['boxes'], sizes)):
+        patch.set_facecolor('lightgrey' if sz in unreliable else 'lightsteelblue')
+
     ax.set_xticklabels([_size_label(sz) for sz in sizes],
                        rotation=45, ha='right', fontsize=8)
     ax.set_xlabel('Payload Size')
     ax.set_ylabel('TX Phase Duration (s)')
-    ax.set_title(f'{module.upper()} · {strategy} — TX Duration per Payload Size (n=30 runs)')
+    ax.set_title(f'{module.upper()} / {strategy} -- TX Duration per Payload Size (n=30 runs)')
+    if unreliable:
+        ax.text(0.01, 0.98, 'Grey boxes: below SNR threshold',
+                transform=ax.transAxes, fontsize=7, va='top', color='grey')
     fig.tight_layout()
     _save(fig, out_dir, f"{module}_{strategy}_run_duration_per_payload.png")
 
 
-def plot_energy_per_payload(summaries, module, strategy, out_dir):
+def plot_energy_per_payload(summaries, module, strategy, out_dir, noise: dict | None):
     """
-    Mean ± SD energy (mJ) per payload size with per-run scatter.
-    Primary plot for cross-module energy comparison.
-    SD uses ddof=1 (sample SD across 30 runs).
+    Mean +/- 1 SD energy (mJ) per payload size.
+    Error bars show cross-run SD (measurement repeatability).
+    A second lighter error bar shows mean measurement uncertainty (1 sigma)
+    from the propagated instrument + noise floor uncertainty.
     """
-    payload_data = _collect(summaries, 'energy_mJ')
+    payload_data  = _collect(summaries, 'energy_mJ')
+    sigma_data    = _collect(summaries, 'sigma_energy_mJ')
+    unreliable    = _unreliable_sizes(summaries)
     sizes = sorted(payload_data.keys())
+    x     = np.arange(len(sizes))
+
+    means      = [np.mean(payload_data[sz])        for sz in sizes]
+    stds       = [np.std(payload_data[sz], ddof=1) for sz in sizes]
+    mean_sigma = [np.mean(sigma_data[sz])           for sz in sizes]  # avg measurement unc
 
     fig, ax = plt.subplots(figsize=(max(10, len(sizes) * 0.85), 5))
     _errorbar_plot(ax, sizes, payload_data,
                    ylabel='Energy (mJ)',
-                   title=f'{module.upper()} · {strategy} — Energy per Payload Size')
+                   title=f'{module.upper()} / {strategy} -- Energy per Payload Size',
+                   unreliable=unreliable)
+
+    # Overlay mean measurement uncertainty as a narrower bar
+    ax.errorbar(x, means, yerr=mean_sigma, fmt='none', color='darkorange',
+                capsize=2, linewidth=0.8, alpha=0.8,
+                label='Measurement uncertainty (1 sigma, mean)')
+    ax.legend(fontsize=7)
     fig.tight_layout()
     _save(fig, out_dir, f"{module}_{strategy}_energy_per_payload.png")
 
 
 def plot_efficiency_per_payload(summaries, module, strategy, out_dir):
-    """
-    Mean ± SD energy efficiency (mJ/KB) per payload size with per-run scatter.
-    Normalises energy for payload size: shows whether larger payloads amortise
-    connection/framing overhead, delivering more bytes per mJ.
-    Lower mJ/KB = more efficient.
-    SD uses ddof=1 (sample SD across 30 runs).
-    Y-axis is log-scale because values span several orders of magnitude
-    (1B is extremely inefficient per KB; 1MB approaches the physical minimum).
-    """
     payload_data = _collect(summaries, 'efficiency_mJ_per_KB')
+    unreliable   = _unreliable_sizes(summaries)
     sizes = sorted(payload_data.keys())
 
     fig, ax = plt.subplots(figsize=(max(10, len(sizes) * 0.85), 5))
     _errorbar_plot(ax, sizes, payload_data,
                    ylabel='Energy Efficiency (mJ / KB)  [log scale]',
-                   title=f'{module.upper()} · {strategy} — Energy Efficiency per Payload Size')
+                   title=f'{module.upper()} / {strategy} -- Energy Efficiency per Payload Size',
+                   unreliable=unreliable)
     try:
         ax.set_yscale('log')
     except Exception:
@@ -419,13 +643,7 @@ def plot_efficiency_per_payload(summaries, module, strategy, out_dir):
     _save(fig, out_dir, f"{module}_{strategy}_efficiency_per_payload.png")
 
 
-def plot_current_trace_overlay(summaries, module, strategy, out_dir):
-    """
-    Overlay of current (mA) vs elapsed time for ALL runs.
-    Each trace is one complete experiment run: baseline phase followed by every
-    payload size transmitted sequentially, with idle periods between payloads.
-    Overlaying all 30 runs reveals waveform consistency and outlier runs.
-    """
+def plot_current_trace_overlay(summaries, module, strategy, out_dir, noise: dict | None):
     n    = len(summaries)
     cmap = _cmap('tab20' if n > 10 else 'tab10', n)
 
@@ -434,9 +652,17 @@ def plot_current_trace_overlay(summaries, module, strategy, out_dir):
         meter = s['meter']
         ax.plot(meter['elapsed_s'], meter['current_mA'],
                 linewidth=0.5, alpha=0.5, color=cmap(i), label=f'Run {s["run"]}')
+
+    # Draw noise floor band if calibration available
+    if noise:
+        floor = noise['sigma_I_floor_mA']
+        ax.axhspan(-floor * SNR_THRESHOLD, floor * SNR_THRESHOLD,
+                   color='lightyellow', alpha=0.5, zorder=0,
+                   label=f'Noise floor +/-{SNR_THRESHOLD}x sigma ({floor*SNR_THRESHOLD:.3f} mA)')
+
     ax.set_xlabel('Elapsed Time (s)')
     ax.set_ylabel('Current (mA)')
-    line1 = f'{module.upper()} [{strategy}] -- Current Draw: All {n} Runs Overlaid'
+    line1 = f'{module.upper()} / {strategy} -- Current Draw: All {n} Runs Overlaid'
     line2 = '(each trace = full experiment: baseline + all payload sizes in sequence)'
     ax.set_title(line1 + chr(10) + line2)
     ax.legend(fontsize=6, ncol=5, loc='upper left')
@@ -445,10 +671,6 @@ def plot_current_trace_overlay(summaries, module, strategy, out_dir):
 
 
 def plot_baseline_stability(summaries, module, strategy, out_dir):
-    """
-    Per-run baseline current (mean ± within-run SD).
-    Checks for thermal drift or power-supply instability across the 30 runs.
-    """
     runs  = [s['run']              for s in summaries]
     means = [s['baseline_mean_mA'] for s in summaries]
     stds  = [s['baseline_std_mA']  for s in summaries]
@@ -460,7 +682,7 @@ def plot_baseline_stability(summaries, module, strategy, out_dir):
                label=f'Mean = {np.nanmean(means):.3f} mA')
     ax.set_xlabel('Run #')
     ax.set_ylabel('Baseline Current (mA)')
-    ax.set_title(f'{module.upper()} · {strategy} — Baseline Current Stability across Runs')
+    ax.set_title(f'{module.upper()} / {strategy} -- Baseline Current Stability across Runs')
     ax.set_xticks(runs)
     ax.set_xticklabels([str(r) for r in runs], fontsize=7, rotation=45)
     ax.legend()
@@ -469,8 +691,7 @@ def plot_baseline_stability(summaries, module, strategy, out_dir):
 
 
 # ── CSV export ────────────────────────────────────────────────────────────────
-def export_summary_csv(summaries, module, strategy, out_dir):
-    """Tidy flat CSV: one row per (run × payload_size) with all derived metrics."""
+def export_summary_csv(summaries, module, strategy, out_dir, noise: dict | None):
     rows = []
     for s in summaries:
         for ps in s['payload_stats']:
@@ -481,12 +702,20 @@ def export_summary_csv(summaries, module, strategy, out_dir):
                 'payload_bytes':            ps['payload_bytes'],
                 'duration_s':               round(ps['duration_s'],             6),
                 'mean_power_mW':            round(ps['mean_power_mW'],          4),
+                'mean_current_mA':          round(ps['mean_current_mA'],        5),
                 'energy_mJ':                round(ps['energy_mJ'],              6),
+                'sigma_energy_mJ':          round(ps['sigma_energy_mJ'],        6),
                 'efficiency_mJ_per_KB':     round(ps['efficiency_mJ_per_KB'],   6),
+                'sigma_eff_mJ_per_KB':      round(ps['sigma_eff_mJ_per_KB'],    6),
+                'snr':                      round(ps['snr'],                    3),
+                'unreliable':               ps['unreliable'],
                 'run_total_energy_mJ':      round(s['total_energy_mJ'],         4),
+                'run_total_sigma_E_mJ':     round(s['total_sigma_E_mJ'],        4),
                 'run_mean_active_power_mW': round(s['mean_power_active_mW'],    4),
                 'baseline_mean_mA':         round(s['baseline_mean_mA'],        5),
                 'baseline_std_mA':          round(s['baseline_std_mA'],         5),
+                'noise_floor_mA':           round(noise['sigma_I_floor_mA'], 6) if noise else 'N/A',
+                'offset_correction_mV':     round(noise['mu_offset_V']*1e3, 4) if noise else 'N/A',
             })
     df = pd.DataFrame(rows)
     fname = out_dir / f"{module}_{strategy}_summary.csv"
@@ -498,14 +727,20 @@ def export_summary_csv(summaries, module, strategy, out_dir):
 def main():
     if not DATA_DIR.exists():
         print(f"[ERROR] Data directory not found: {DATA_DIR}")
-        print("  Create a folder called 'analyze_data' next to this script.")
         sys.exit(1)
 
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # ── Load noise floor calibration ──
+    print("── Noise Floor Calibration ──")
+    noise = load_noise_floor(DATA_DIR, PLOTS_DIR)
+    print()
+
+    # ── Discover experiment files ──
     csv_files = sorted(DATA_DIR.glob("*.csv"))
+    csv_files = [f for f in csv_files if f.name != "shortcircuit.csv"]
     if not csv_files:
-        print(f"[ERROR] No CSV files found in {DATA_DIR}")
+        print(f"[ERROR] No experiment CSV files found in {DATA_DIR}")
         sys.exit(1)
 
     groups, skipped = defaultdict(list), []
@@ -517,10 +752,10 @@ def main():
         groups[(module, strategy)].append({'path': f, 'run': run_num})
 
     if skipped:
-        print(f"\n[WARN] Skipped {len(skipped)} file(s) with unrecognised names:")
+        print(f"[WARN] Skipped {len(skipped)} unrecognised file(s):")
         for s in skipped: print(f"  {s}")
 
-    print(f"\nFound {len(groups)} experiment group(s) in {DATA_DIR}:\n")
+    print(f"Found {len(groups)} experiment group(s) in {DATA_DIR}:\n")
     all_ok = True
 
     for group_key, file_list in sorted(groups.items()):
@@ -528,28 +763,37 @@ def main():
         file_list_sorted = sorted(file_list, key=lambda x: x['run'])
         print(f"━━ {module.upper()} / {strategy} ({len(file_list)} runs) ━━")
 
-        parsed_list = [parse_csv(info['path']) for info in file_list_sorted]
+        parsed_list = [parse_csv(info['path'], noise) for info in file_list_sorted]
         all_ok = validate_group(group_key, file_list_sorted, parsed_list) and all_ok
 
         summaries = [s for s in
-                     (summarise_run(p, i['run']) for p, i in zip(parsed_list, file_list_sorted))
+                     (summarise_run(p, i['run'], noise)
+                      for p, i in zip(parsed_list, file_list_sorted))
                      if s is not None]
 
         if not summaries:
-            print("  [WARN] No valid meter data — skipping plots."); continue
+            print("  [WARN] No valid meter data -- skipping plots."); continue
+
+        # Report unreliable sizes
+        bad = _unreliable_sizes(summaries)
+        if bad:
+            labels = ', '.join(_size_label(sz) for sz in sorted(bad))
+            print(f"  [WARN] Payload sizes below SNR threshold (flagged): {labels}")
+        else:
+            print(f"  [OK]   All payload sizes above SNR threshold")
 
         plot_mean_power_per_run(       summaries, module, strategy, PLOTS_DIR)
         plot_total_energy_per_run(     summaries, module, strategy, PLOTS_DIR)
         plot_run_duration_per_payload( summaries, module, strategy, PLOTS_DIR)
-        plot_energy_per_payload(       summaries, module, strategy, PLOTS_DIR)
+        plot_energy_per_payload(       summaries, module, strategy, PLOTS_DIR, noise)
         plot_efficiency_per_payload(   summaries, module, strategy, PLOTS_DIR)
-        plot_current_trace_overlay(    summaries, module, strategy, PLOTS_DIR)
+        plot_current_trace_overlay(    summaries, module, strategy, PLOTS_DIR, noise)
         plot_baseline_stability(       summaries, module, strategy, PLOTS_DIR)
-        export_summary_csv(            summaries, module, strategy, PLOTS_DIR)
+        export_summary_csv(            summaries, module, strategy, PLOTS_DIR, noise)
         print()
 
     print("✓ All validation checks passed." if all_ok
-          else "⚠ Some validation checks FAILED — see warnings above.")
+          else "⚠ Some validation checks FAILED -- see warnings above.")
     print(f"\nAll outputs saved to: {PLOTS_DIR}")
 
 
