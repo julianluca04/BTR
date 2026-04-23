@@ -144,7 +144,7 @@ def send_lora_payload(tx, payload_size, index):
             if line == "ok":
                 tx_start_ts = datetime.now().isoformat(timespec="milliseconds")
 
-            elif line == "radio_tx_ok":
+            elif line == "radio_tx_ok": 
                 tx_end_ts = datetime.now().isoformat(timespec="milliseconds")
                 got_tx = True
                 break
@@ -154,7 +154,7 @@ def send_lora_payload(tx, payload_size, index):
 
     duration = (
         datetime.fromisoformat(tx_end_ts) -
-        datetime.fromisoformat(tx_cmd_ts)
+        datetime.fromisoformat(tx_start_ts)
     ).total_seconds() * 1000
 
     return {
