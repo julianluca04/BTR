@@ -1,158 +1,176 @@
-import pyvisa
 import serial
-import threading
 import time
-from datetime import datetime
 
 TX_PORT = "/dev/cu.usbmodem1201"
 RX_PORT = "/dev/cu.usbmodem11301"
 BAUD = 57600
 
-LORA_FREQ = "915000000"
-LORA_SF = "sf12"
-LORA_BW = "125"
-LORA_CR = "4/5"
-LORA_PWR = "14"
+PAYLOAD_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 220]
 
-PAYLOAD_SIZE = 220
-
-RX_RUNNING = True
-rx_lock = threading.Lock()
-last_payload = None
+TX_TIMEOUT = 20.0
+RX_TIMEOUT = 20.0
 
 
-def drain(ser):
+def readline(ser, timeout=2.0):
+    """Read one CRLF-terminated line."""
+    deadline = time.time() + timeout
+    buf = b""
+    while time.time() < deadline:
+        if ser.in_waiting:
+            ch = ser.read(1)
+            buf += ch
+            if buf.endswith(b"\r\n"):
+                return buf.decode(errors="ignore").strip()
+        else:
+            time.sleep(0.002)
+    return buf.decode(errors="ignore").strip()
+
+
+def cmd(ser, command, timeout=0.5):
+    """Send command, return first response."""
+    ser.reset_input_buffer()
+    ser.write((command + "\r\n").encode())
     time.sleep(0.05)
-    ser.read(ser.in_waiting or 0)
+    resp = readline(ser, timeout=timeout)
+    print(f"    >> {command!r}  <- {resp!r}")
+    return resp
 
 
-def send_cmd(ser, cmd):
-    ser.write((cmd + "\r\n").encode())
-    time.sleep(0.3)
-    out = ser.read(ser.in_waiting or 0).decode(errors="ignore")
-    return out.strip()
-
-
-def autobaud(ser, name):
-    print(f"[{name}] Sync...")
-    for _ in range(3):
-        ser.write(b"\x00\x55\r\n")
-        time.sleep(0.3)
-
-    time.sleep(1)
-    out = ser.read(ser.in_waiting or 0).decode(errors="ignore")
-    print(f"[{name}] {out}")
+def reset_radio(ser, name):
+    print(f"\n[{name}] RESET")
+    ser.write(b"sys reset\r\n")
+    time.sleep(2.0)
+    while ser.in_waiting:
+        line = readline(ser, timeout=0.3)
+        if line:
+            print(f"[{name}] {line}")
+    ser.reset_input_buffer()
 
 
 def configure(ser, name):
-    print(f"[{name}] Config")
-
-    cmds = [
+    print(f"[{name}] CONFIGURE")
+    steps = [
         "mac pause",
         "radio set mod lora",
-        f"radio set freq {LORA_FREQ}",
-        f"radio set sf {LORA_SF}",
-        f"radio set bw {LORA_BW}",
-        f"radio set cr {LORA_CR}",
-        f"radio set pwr {LORA_PWR}",
-        "radio set crc on",
-        "radio set wdt 0",
+        "radio set freq 915000000",
+        "radio set sf sf12",
+        "radio set bw 125",
+        "radio set cr 4/5",
+        "radio set pwr -3",  # Minimum TX power for close-range
+        "radio set crc off",  # Disable CRC to accept potentially corrupted packets
+        "radio set wdt 15000",
+        "radio set prlen 8",
+        "radio set sync 12",
     ]
-
-    for c in cmds:
-        r = send_cmd(ser, c)
-        print(f"[{name}] {c} -> {r}")
-
-
-def rx_loop(rx):
-    global last_payload, RX_RUNNING
-
-    while RX_RUNNING:
-        try:
-            rx.write(b"radio rx 0\r\n")
-            time.sleep(0.2)
-
-            deadline = time.time() + 1.5
-
-            while time.time() < deadline:
-                if rx.in_waiting:
-                    line = rx.readline().decode(errors="ignore").strip()
-
-                    if not line:
-                        continue
-
-                    print("[RX]", line)
-
-                    if line.startswith("radio_rx"):
-                        parts = line.split()
-
-                        if len(parts) > 1:
-                            payload_hex = parts[1]
-
-                            with rx_lock:
-                                last_payload = payload_hex
-
-                        rx.write(b"radio rxstop\r\n")
-                        time.sleep(0.1)
-                        break
-
-                time.sleep(0.01)
-
-        except Exception as e:
-            print("[RX ERROR]", e)
-
-        time.sleep(0.05)
-
-
-def send_220(tx):
-    payload = bytes([ord('A') + (i % 26) for i in range(PAYLOAD_SIZE)])
-    hex_payload = payload.hex().upper()
-
-    tx.write(b"radio rxstop\r\n")
-    time.sleep(0.2)
-
-    tx.write(f"radio tx {hex_payload}\r\n".encode())
-
-    end = time.time() + 10
-
-    while time.time() < end:
-        if tx.in_waiting:
-            line = tx.readline().decode(errors="ignore").strip()
-            print("[TX]", line)
-            if "radio_tx_ok" in line:
-                return True
-
-    return False
+    for command in steps:
+        cmd(ser, command)
+    print(f"[{name}] CONFIG DONE\n")
 
 
 if __name__ == "__main__":
-    tx = serial.Serial(TX_PORT, BAUD, timeout=1)
-    rx = serial.Serial(RX_PORT, BAUD, timeout=1)
+    tx = serial.Serial(TX_PORT, BAUD, timeout=0)
+    rx = serial.Serial(RX_PORT, BAUD, timeout=0)
 
-    time.sleep(2)
+    time.sleep(1)
 
-    autobaud(tx, "TX")
-    autobaud(rx, "RX")
-
+    reset_radio(tx, "TX")
+    reset_radio(rx, "RX")
     configure(tx, "TX")
     configure(rx, "RX")
 
-    RX_RUNNING = True
-    t = threading.Thread(target=rx_loop, args=(rx,), daemon=True)
-    t.start()
+    print("\n===== START PIPELINE =====\n")
 
-    print("START 220 BYTE TEST")
+    passed = 0
+    for i, size in enumerate(PAYLOAD_SIZES):
+        char = chr(ord('A') + (i % 26))
+        payload = bytes([ord(char)] * size)
+        hex_payload = payload.hex().upper()
 
-    ok = send_220(tx)
+        print(f"\n--- Test {i+1}/{len(PAYLOAD_SIZES)}: {size}B ('{char}' x {size}) ---")
 
-    time.sleep(2)
+        # Arm RX
+        print("[1] Arming RX")
+        rx.reset_input_buffer()
+        rx.write(b"radio rx 0\r\n")
+        time.sleep(0.05)
+        ack = readline(rx, timeout=1.0)
+        print(f"[RX] arm: {ack!r}")
+        if ack != "ok":
+            print(f"[FAIL] RX arm rejected")
+            break
 
-    with rx_lock:
-        print("LAST PAYLOAD:", last_payload)
+        time.sleep(0.3)
 
-    RX_RUNNING = False
+        # TX sends
+        print(f"[2] TX transmitting {size}B")
+        tx.reset_input_buffer()
+        tx.write(f"radio tx {hex_payload}\r\n".encode())
+        time.sleep(0.05)
+
+        first = readline(tx, timeout=2.0)
+        print(f"[TX] immediate: {first!r}")
+        if first != "ok":
+            print(f"[FAIL] TX rejected")
+            break
+
+        print("[TX] waiting for airtime...")
+        tx_ok = False
+        deadline = time.time() + TX_TIMEOUT
+        while time.time() < deadline:
+            line = readline(tx, timeout=1.0)
+            if line:
+                print(f"[TX] {line}")
+                if line == "radio_tx_ok":
+                    tx_ok = True
+                    break
+                if line.startswith("radio_err"):
+                    break
+
+        if not tx_ok:
+            print(f"[FAIL] TX failed")
+            break
+
+        print("[3] Waiting for RX")
+
+        # Wait for RX
+        rx_val = None
+        deadline = time.time() + RX_TIMEOUT
+        while time.time() < deadline:
+            line = readline(rx, timeout=1.0)
+            if line:
+                print(f"[RX] {line}")
+                if line.startswith("radio_rx"):
+                    parts = line.split()
+                    if len(parts) > 1:
+                        rx_val = parts[1]
+                    break
+                if line.startswith("radio_err"):
+                    print("[RX] receive error")
+                    break
+
+        if rx_val is None:
+            print(f"[FAIL] No valid RX")
+            break
+
+        # Verify
+        print("[4] Verifying")
+        try:
+            rx_bytes = bytes.fromhex(rx_val)
+        except ValueError:
+            print(f"[FAIL] Bad hex: {rx_val!r}")
+            break
+
+        expected = ord(char)
+        if len(rx_bytes) == size and all(b == expected for b in rx_bytes):
+            print(f"[PASS] {size}B OK")
+            passed += 1
+        else:
+            print(f"[FAIL] Mismatch: expected {size}B of 0x{expected:02X}, got {len(rx_bytes)}B")
+            if rx_bytes:
+                print(f"       First bytes: {rx_bytes[:10].hex()}")
+            break
 
     tx.close()
     rx.close()
 
-    print("SUCCESS" if ok else "FAIL")
+    print(f"\n===== DONE: {passed}/{len(PAYLOAD_SIZES)} passed =====")
