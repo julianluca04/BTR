@@ -45,9 +45,9 @@ TCP_PORT       = 8080
 ESP32_SSID     = "esp32_test"
 ESP32_FQBN     = "esp32:esp32:esp32c3"
 ESP32_PORT     = "/dev/tty.usbmodem11101"
-ESP32_SKETCH   = "/Users/foml/coding/MSP/year_3/BTR/experiments/WiFi/experiment 4 (chunk 1460)/wifi_4"
+ESP32_SKETCH = "/Users/foml/coding/MSP/year_3/BTR/experiments/WiFi/byte byte tiral 2/wifi_2"
 PICO_FQBN      = "rp2040:rp2040:rpipico"
-PICO_SKETCH    = "/Users/foml/coding/MSP/year_3/BTR/experiments/WiFi/experiment 4 (chunk 1460)/Pico_4"
+PICO_SKETCH  = "/Users/foml/coding/MSP/year_3/BTR/experiments/WiFi/byte byte tiral 2/Pico_2"
 SAFE_BUILD_DIR = "/tmp/wifi_upload_tmp"
 
 IDLE_S              = 1.0
