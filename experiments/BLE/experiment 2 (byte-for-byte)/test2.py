@@ -360,6 +360,7 @@ def meter_stream(meter, rows, stop_event, flush_callback):
         except Exception as e:
             print(f"[Meter] Read error: {e}")
             time.sleep(0.2)
+        time.sleep(0.001)  # yield GIL so asyncio BLE callbacks get CPU time
 
 
 # ─── BLE receiver ─────────────────────────────────────────────────────────────
@@ -477,6 +478,11 @@ async def run_ble_test_async(pico, write_event_row):
         receiver.start()
         await client.start_notify(NUS_TX_UUID, receiver.handler)
         print(f"[✓] Subscribed to BLE notifications. MTU: {client.mtu_size}B ({client.mtu_size - 3}B data)")
+
+        # Wait for the notification subscription to be fully active on the nRF
+        # side before sending 'go'. Without this the first SIZE notification
+        # fires before the queue is ready and is silently dropped.
+        await asyncio.sleep(1.0)
 
         pico.reset_input_buffer()
         pico.write(b"go\n")

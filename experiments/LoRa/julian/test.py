@@ -6,13 +6,10 @@ RX_PORT = "/dev/cu.usbmodem11301"
 BAUD = 57600
 
 PAYLOAD_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 220]
-
-TX_TIMEOUT = 20.0
-RX_TIMEOUT = 20.0
-
+TX_TIMEOUT = 5.0
+RX_TIMEOUT = 5.0
 
 def readline(ser, timeout=2.0):
-    """Read one CRLF-terminated line."""
     deadline = time.time() + timeout
     buf = b""
     while time.time() < deadline:
@@ -25,152 +22,94 @@ def readline(ser, timeout=2.0):
             time.sleep(0.002)
     return buf.decode(errors="ignore").strip()
 
-
-def cmd(ser, command, timeout=0.5):
-    """Send command, return first response."""
+def cmd(ser, command, timeout=1.0):
     ser.reset_input_buffer()
     ser.write((command + "\r\n").encode())
-    time.sleep(0.05)
-    resp = readline(ser, timeout=timeout)
-    print(f"    >> {command!r}  <- {resp!r}")
-    return resp
+    time.sleep(0.15) # Increased for chip stability
+    return readline(ser, timeout=timeout)
 
+def hard_reset_all(tx, rx):
+    print("--- PERFORMING HARD HARDWARE RESET ---")
+    tx.write(b"sys reset\r\n")
+    rx.write(b"sys reset\r\n")
+    time.sleep(2.5)
+    configure_radios(tx, rx)
 
-def reset_radio(ser, name):
-    print(f"\n[{name}] RESET")
-    ser.write(b"sys reset\r\n")
-    time.sleep(2.0)
-    while ser.in_waiting:
-        line = readline(ser, timeout=0.3)
-        if line:
-            print(f"[{name}] {line}")
-    ser.reset_input_buffer()
-
-
-def configure(ser, name):
-    print(f"[{name}] CONFIGURE")
-    steps = [
-        "mac pause",
-        "radio set mod lora",
-        "radio set freq 915000000",
-        "radio set sf sf12",
-        "radio set bw 125",
-        "radio set cr 4/5",
-        "radio set pwr -3",  # Minimum TX power for close-range
-        "radio set crc off",  # Disable CRC to accept potentially corrupted packets
-        "radio set wdt 15000",
-        "radio set prlen 8",
-        "radio set sync 12",
-    ]
-    for command in steps:
-        cmd(ser, command)
-    print(f"[{name}] CONFIG DONE\n")
-
+def configure_radios(tx_ser, rx_ser):
+    for s in [tx_ser, rx_ser]:
+        cmd(s, "mac pause")
+        cmd(s, "radio set mod lora")
+        cmd(s, "radio set freq 915000000")
+        cmd(s, "radio set sf sf8")       # Switched to SF8 for better desk stability
+        cmd(s, "radio set bw 500")
+        cmd(s, "radio set cr 4/5")
+        cmd(s, "radio set pwr 2")
+        cmd(s, "radio set crc on")
+        cmd(s, "radio set prlen 12")     # Longer preamble for better sync lock
+        cmd(s, "radio set sync 12")
+    print("Configuration applied.")
 
 if __name__ == "__main__":
-    tx = serial.Serial(TX_PORT, BAUD, timeout=0)
-    rx = serial.Serial(RX_PORT, BAUD, timeout=0)
+    tx_ser = serial.Serial(TX_PORT, BAUD, timeout=0)
+    rx_ser = serial.Serial(RX_PORT, BAUD, timeout=0)
 
-    time.sleep(1)
+    hard_reset_all(tx_ser, rx_ser)
 
-    reset_radio(tx, "TX")
-    reset_radio(rx, "RX")
-    configure(tx, "TX")
-    configure(rx, "RX")
+    print("\n===== STARTING RELIABLE PIPELINE =====\n")
+    passed_count = 0
 
-    print("\n===== START PIPELINE =====\n")
-
-    passed = 0
     for i, size in enumerate(PAYLOAD_SIZES):
         char = chr(ord('A') + (i % 26))
-        payload = bytes([ord(char)] * size)
-        hex_payload = payload.hex().upper()
+        payload_hex = (char.encode().hex() * size).upper()
+        print(f"TEST {i+1} ({size}B):", end=" ", flush=True)
 
-        print(f"\n--- Test {i+1}/{len(PAYLOAD_SIZES)}: {size}B ('{char}' x {size}) ---")
+        test_success = False
+        consecutive_errors = 0
+        
+        for attempt in range(1, 16): 
+            # If we keep failing, reset the hardware entirely
+            if consecutive_errors >= 4:
+                print("(Resetting HW)", end=" ", flush=True)
+                hard_reset_all(tx_ser, rx_ser)
+                consecutive_errors = 0
 
-        # Arm RX
-        print("[1] Arming RX")
-        rx.reset_input_buffer()
-        rx.write(b"radio rx 0\r\n")
-        time.sleep(0.05)
-        ack = readline(rx, timeout=1.0)
-        print(f"[RX] arm: {ack!r}")
-        if ack != "ok":
-            print(f"[FAIL] RX arm rejected")
-            break
+            tx_ser.write(b"radio rxstop\r\n")
+            rx_ser.write(b"radio rxstop\r\n")
+            time.sleep(0.2)
+            
+            tx_ser.reset_input_buffer()
+            rx_ser.reset_input_buffer()
 
-        time.sleep(0.3)
+            cmd(rx_ser, "radio rx 0")
+            time.sleep(0.2) 
 
-        # TX sends
-        print(f"[2] TX transmitting {size}B")
-        tx.reset_input_buffer()
-        tx.write(f"radio tx {hex_payload}\r\n".encode())
-        time.sleep(0.05)
+            tx_ser.write(f"radio tx {payload_hex}\r\n".encode())
+            
+            received_val = None
+            rx_deadline = time.time() + RX_TIMEOUT
+            while time.time() < rx_deadline:
+                line = readline(rx_ser, timeout=0.5)
+                if line:
+                    if line.startswith("radio_rx"):
+                        parts = line.split()
+                        if len(parts) > 1:
+                            received_val = parts[1].upper()
+                        break
+                    elif "radio_err" in line:
+                        print("X", end="", flush=True)
+                        consecutive_errors += 1
+                        time.sleep(0.4) 
+                        break
+            
+            if received_val == payload_hex:
+                print(f" [A{attempt}: PASS]")
+                passed_count += 1
+                test_success = True
+                time.sleep(1.0) # VITAL: Cool-down after success
+                break
+        
+        if not test_success:
+            print(" [FAILED]")
 
-        first = readline(tx, timeout=2.0)
-        print(f"[TX] immediate: {first!r}")
-        if first != "ok":
-            print(f"[FAIL] TX rejected")
-            break
-
-        print("[TX] waiting for airtime...")
-        tx_ok = False
-        deadline = time.time() + TX_TIMEOUT
-        while time.time() < deadline:
-            line = readline(tx, timeout=1.0)
-            if line:
-                print(f"[TX] {line}")
-                if line == "radio_tx_ok":
-                    tx_ok = True
-                    break
-                if line.startswith("radio_err"):
-                    break
-
-        if not tx_ok:
-            print(f"[FAIL] TX failed")
-            break
-
-        print("[3] Waiting for RX")
-
-        # Wait for RX
-        rx_val = None
-        deadline = time.time() + RX_TIMEOUT
-        while time.time() < deadline:
-            line = readline(rx, timeout=1.0)
-            if line:
-                print(f"[RX] {line}")
-                if line.startswith("radio_rx"):
-                    parts = line.split()
-                    if len(parts) > 1:
-                        rx_val = parts[1]
-                    break
-                if line.startswith("radio_err"):
-                    print("[RX] receive error")
-                    break
-
-        if rx_val is None:
-            print(f"[FAIL] No valid RX")
-            break
-
-        # Verify
-        print("[4] Verifying")
-        try:
-            rx_bytes = bytes.fromhex(rx_val)
-        except ValueError:
-            print(f"[FAIL] Bad hex: {rx_val!r}")
-            break
-
-        expected = ord(char)
-        if len(rx_bytes) == size and all(b == expected for b in rx_bytes):
-            print(f"[PASS] {size}B OK")
-            passed += 1
-        else:
-            print(f"[FAIL] Mismatch: expected {size}B of 0x{expected:02X}, got {len(rx_bytes)}B")
-            if rx_bytes:
-                print(f"       First bytes: {rx_bytes[:10].hex()}")
-            break
-
-    tx.close()
-    rx.close()
-
-    print(f"\n===== DONE: {passed}/{len(PAYLOAD_SIZES)} passed =====")
+    tx_ser.close()
+    rx_ser.close()
