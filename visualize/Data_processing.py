@@ -4,7 +4,7 @@ from decimal import Decimal, getcontext
 import concurrent.futures
 import math
 
-# Set precision for Decimal math
+# Set precision for high-accuracy energy math
 getcontext().prec = 20
 
 # --- MEASURED PHYSICAL CONSTANTS ---
@@ -23,14 +23,14 @@ SUMMARY_PATH = os.path.join(SUMMARY_DIR, "summary_energy_comprehensive.csv")
 PROTOCOLS = ["wifi", "BLE"]
 EXPERIMENTS = ["chunk", "byte", "all"]
 
-def is_magnitude_glitch(ratio):
-    """Detects if ratio is a power of 10 (10, 100, 0.1, etc)."""
-    if ratio <= 0: return False
+def is_magnitude_glitch(val_a, val_b):
+    if val_a == 0 or val_b == 0: return False
     try:
-        log_val = math.log10(float(ratio))
-        # If it's very close to an integer (excluding 0), it's a magnitude jump
-        return abs(log_val - round(log_val)) < 0.0001 and round(log_val) != 0
-    except: return False
+        ratio = float(val_a) / float(val_b)
+        log_val = math.log10(ratio)
+        return abs(log_val - round(log_val)) < 0.01 and round(log_val) != 0
+    except:
+        return False
 
 def process_single_file(file_info):
     protocol, exp, file_name, path = file_info
@@ -39,88 +39,110 @@ def process_single_file(file_info):
         with open(path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
 
+        # Find section markers
+        info_idx = next((i for i, l in enumerate(lines) if "# INFO" in l), -1)
         meter_idx = next((i for i, l in enumerate(lines) if "# METER" in l), -1)
+        
         if meter_idx == -1: return None
 
-        meter_data = []
+        # Capture existing # INFO block
+        existing_info = lines[info_idx + 1 : meter_idx] if info_idx != -1 else []
+        # Filter out old # OVERVIEW headers if they were already there to avoid nesting
+        existing_info = [l for l in existing_info if "# OVERVIEW" not in l]
         
-        # --- 1. TARGETED PARSING ---
+        meter_data = []
+        overview_rows = []
+        
+        # --- 1. CLEANING, PARSING & OVERVIEW EXTRACTION ---
+        # We ONLY look after the # METER tag for data and overview candidates
         for line in lines[meter_idx + 1:]:
             line_str = line.strip()
-            # ONLY skip empty lines or the specific 'delaystart500' marker
-            if not line_str or "delaystart500" in line_str:
+            if not line_str or "delaystart500" in line_str or "start_delay_ms" in line_str:
                 continue
                 
             parts = [p.strip() for p in line_str.split(',')]
-            if len(parts) < 2: continue
+            
+            # CHECK FOR 5th COLUMN (Index 4)
+            # If there's a value in the 5th column, move this entire row to Overview
+            if len(parts) >= 5 and parts[4]:
+                overview_rows.append(line_str + "\n")
+                continue # Do not include this in the mathematical data area
+
+            if len(parts) < 2 or parts[0] == "start_delay_ms": 
+                continue
 
             try:
                 v_raw = Decimal(parts[1])
-                # Unit detection: >1 is mV, <=1 is V
                 v_final_v = v_raw / Decimal('1000') if v_raw > Decimal('1') else v_raw
                 v_final_mv = v_final_v * Decimal('1000')
-                
-                # I = (V_shunt_mv - Offset) / R
                 i_ma = (v_final_mv - V_OFFSET_MV) / R_MEAN
                 
                 meter_data.append({
                     'ts': parts[0],
-                    'v_val': float(v_final_v),
-                    'i_val': float(i_ma),
+                    'v_val': v_final_v,
+                    'i_val': i_ma,
                     'state': parts[2] if len(parts) > 2 else ''
                 })
             except: continue
 
         if not meter_data: return None
 
-        # --- 2. MAGNITUDE CORRECTION (SAME DIGITS, SMALLER VALUE) ---
+        # --- 2. MAGNITUDE ISSUE FIX (Only on pure data) ---
         for i in range(1, len(meter_data) - 1):
             curr_i = meter_data[i]['i_val']
             prev_i = meter_data[i-1]['i_val']
             next_i = meter_data[i+1]['i_val']
-            
-            if curr_i == 0: continue
-            
-            # Check if current is a magnitude jump from either neighbor
-            if is_magnitude_glitch(prev_i / curr_i) or is_magnitude_glitch(next_i / curr_i):
-                # Take the smaller value of the two neighbors
+            if is_magnitude_glitch(curr_i, prev_i) or is_magnitude_glitch(curr_i, next_i):
                 meter_data[i]['i_val'] = min(prev_i, next_i)
 
-        # Extract for stats
-        final_i = [d['i_val'] for d in meter_data]
-        final_v = [d['v_val'] for d in meter_data]
+        # --- 3. RECONSTRUCT FILE: INFO -> OVERVIEW -> METER ---
+        cal_header = f"Calibration: R={R_MEAN}Ohm, Offset={V_OFFSET_MV}mV, Vsrc={V_SOURCE_V}V\n"
+        
+        # Build the new file structure
+        new_content = ["# INFO\n", cal_header]
+        for line in existing_info:
+            if "Calibration:" not in line: # Avoid double calibration lines
+                new_content.append(line)
+        
+        new_content.append("# OVERVIEW\n")
+        new_content.extend(overview_rows)
+        
+        new_content.append("# METER\n")
+        for d in meter_data:
+            v_str = format(d['v_val'].normalize(), 'f')
+            i_str = format(d['i_val'].normalize(), 'f')
+            new_content.append(f"{d['ts']},{v_str},{d['state']},{i_str}\n")
 
-        # --- 3. STATISTICAL CALCULATIONS ---
-        series_i = pd.Series(final_i)
-        series_v = pd.Series(final_v)
-        mean_i = series_i.mean()
+        with open(path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+
+        # --- 4. SUMMARY STATS ---
+        i_series = pd.Series([float(d['i_val']) for d in meter_data])
+        v_series = pd.Series([float(d['v_val']) for d in meter_data])
+        mean_i = i_series.mean()
         v_src = float(V_SOURCE_V)
         
-        # Uncertainty
         rel_v_shunt = float(V_NOISE_MV) / (mean_i * float(R_MEAN)) if mean_i != 0 else 0
         total_rel_uncert = math.sqrt(rel_v_shunt**2 + (float(R_STD)/float(R_MEAN))**2 + (float(V_SOURCE_STD)/v_src)**2)
 
         return {
             'Protocol': protocol, 'Experiment': exp, 'Run': file_name, 
-            'Samples_N': len(series_i),
-            'Vshunt_Mean_V': series_v.mean(), 
-            'Vshunt_Min_V': series_v.min(), 
-            'Vshunt_Max_V': series_v.max(),
+            'Samples_N': len(i_series),
+            'Vshunt_Mean_V': v_series.mean(), 
+            'Vshunt_Max_V': v_series.max(),
             'Current_Mean_mA': mean_i, 
-            'Current_Median_mA': series_i.median(),
-            'Current_Mode_mA': series_i.mode().iloc[0] if not series_i.mode().empty else None,
-            'Current_Std_mA': series_i.std(),
-            'Current_Skewness': series_i.skew(),
-            'Current_Kurtosis': series_i.kurt(),
+            'Current_Max_mA': i_series.max(),
+            'Current_Std_mA': i_series.std(),
             'Power_Mean_mW': mean_i * v_src, 
             'Power_Uncertainty_mW': abs(mean_i * v_src) * total_rel_uncert
         }
-    except Exception:
+    except Exception as e:
+        print(f"Error in {file_name}: {e}")
         return None
 
 def main():
     print("-" * 50)
-    print("STARTING RESTORED ANALYSIS RUN...")
+    print("STARTING MASTER PROCESSOR (Overview Extraction + Mag Fix)")
     if not os.path.exists(SUMMARY_DIR): os.makedirs(SUMMARY_DIR)
 
     tasks = []
@@ -137,12 +159,9 @@ def main():
         results = [r for r in list(executor.map(process_single_file, tasks)) if r]
 
     if results:
-        df = pd.DataFrame(results)
-        df.to_csv(SUMMARY_PATH, index=False)
-        print(f"\nSUCCESS: Summary generated with {len(results)} runs.")
-        print(f"Location: {SUMMARY_PATH}")
-    else:
-        print("\nERROR: No data processed. Check file paths and # METER tags.")
+        pd.DataFrame(results).to_csv(SUMMARY_PATH, index=False)
+        print(f"\nSUCCESS: Created {SUMMARY_PATH}")
+        print("CSV sections updated: # INFO -> # OVERVIEW -> # METER")
     print("-" * 50)
 
 if __name__ == "__main__":
