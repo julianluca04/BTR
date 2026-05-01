@@ -1,237 +1,126 @@
 import os
 import pandas as pd
-import numpy as np
-from decimal import Decimal, getcontext
 import concurrent.futures
-import math
+from datetime import datetime
 
-getcontext().prec = 20
-
+# --- Configuration ---
 R_MEAN = 1.134584
-R_STD = 0.001448
 V_OFFSET = -0.002182e-3
-U_OFFSET = 0.001699e-3
-V_SOURCE = 5.020379
-U_VSOURCE = 0.000356
-
-HMC8012_READING_PCT = 0.00015
-HMC8012_RANGE_PCT = 0.00002
-HMC8012_RANGE_V = 0.400
-RECT_TO_GAUSSIAN = math.sqrt(3)
-
 BASE_PATH = "/Users/foml/coding/MSP/year_3/BTR/visualize/data"
-SUMMARY_DIR = "/Users/foml/coding/MSP/year_3/BTR/visualize"
-SUMMARY_PATH = os.path.join(SUMMARY_DIR, "summary_energy_comprehensive.csv")
 PROTOCOLS = ["wifi", "BLE"]
 EXPERIMENTS = ["chunk", "byte", "all"]
-K_FACTOR = 2
 
-
-def is_7_5_x_glitch(a, b):
-    if a == 0 or b == 0:
-        return False
-    try:
-        r = a / b
-        return r >= 7.5 or r <= (1 / 7.5)
-    except:
-        return False
-
-
-def effective_sample_size(s):
-    n = len(s)
-    if n < 3:
-        return n
-    try:
-        rho = s.autocorr(lag=1)
-        if np.isnan(rho) or abs(rho) >= 1:
-            return n
-        return max(1, n * (1 - rho) / (1 + rho))
-    except:
-        return n
-
-
-def load_file(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return f.readlines()
-
-
-def split_sections(lines):
-    info_idx = next((i for i, l in enumerate(lines) if "# INFO" in l), -1)
-    meter_idx = next((i for i, l in enumerate(lines) if "# METER" in l), -1)
-    return info_idx, meter_idx
-
-
-def parse_data(lines, meter_idx):
-    raw = []
-    overview = []
-
-    for line in lines[meter_idx + 1:]:
-        s = line.strip()
-        if not s or "delay" in s:
-            continue
-
-        parts = [p.strip() for p in s.split(",")]
-
-        if len(parts) >= 5 and parts[4]:
-            overview.append(s + "\n")
-            continue
-
-        if len(parts) < 2:
-            continue
-
-        try:
-            v = float(parts[1])
-            v_norm = v / 1000.0 if v > 1.0 else v
-            raw.append({
-                "ts": parts[0],
-                "v_raw": v,
-                "v_norm": v_norm,
-                "state": parts[2] if len(parts) > 2 else ""
-            })
-        except:
-            continue
-
-    return raw, overview
-
-
-def glitch_correction(raw, file_name, glitch_log):
-    v = [r["v_norm"] for r in raw]
-    clean = list(v)
-    noise_gate = 0.001
-
-    for i in range(1, len(v) - 1):
-        if abs(v[i]) > noise_gate:
-            if is_7_5_x_glitch(v[i], v[i-1]) or is_7_5_x_glitch(v[i], v[i+1]):
-                clean[i] = min(v[i-1], v[i+1])
-                glitch_log.append(f"[{file_name}] glitch at {raw[i]['ts']}")
-
-    return clean
-
-
-def compute_stats(clean):
-    s = pd.Series(clean)
-    n = len(s)
-    neff = effective_sample_size(s)
-
-    uA = s.std() / math.sqrt(neff) if neff > 0 else 0
-    uB = math.sqrt(
-        ((HMC8012_READING_PCT * abs(s.mean())) / RECT_TO_GAUSSIAN) ** 2 +
-        ((HMC8012_RANGE_PCT * HMC8012_RANGE_V) / RECT_TO_GAUSSIAN) ** 2
-    )
-
-    u = math.sqrt(uA**2 + uB**2 + U_OFFSET**2)
-
-    current = (s - V_OFFSET) / R_MEAN
-
-    return {
-        "series": s,
-        "current": current,
-        "n": n,
-        "neff": neff,
-        "u": u
-    }
-
-
-def write_file(path, lines, info, overview, raw, clean):
-    out = [
-        f"{raw[i]['ts']},{clean[i]:.9f},{raw[i]['state']},{((clean[i]-V_OFFSET)/R_MEAN):.9f}\n"
-        for i in range(len(clean))
-    ]
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(["# INFO\n"] + info + ["# OVERVIEW\n"] + overview + ["# METER\n"] + out)
-
+# Define our headers
+RESULTS_HEADER = "Index, Phase, Mean_V, Min_V, Max_V, Spread_V, Std_V, Elapsed_ms\n"
+METER_HEADER = "Timestamp, V_Shunt, Phase, Current\n"
 
 def process_single_file(task):
     protocol, exp, name, path = task
-
-    if not os.path.exists(path):
-        return None
-
     try:
-        lines = load_file(path)
-        info_idx, meter_idx = split_sections(lines)
-        if meter_idx == -1:
-            return None
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
 
-        info = []
-        skip = False
-        for l in lines[info_idx+1:meter_idx]:
-            s = l.strip()
-            if "# META" in s:
-                skip = True
+        meter_idx = next((i for i, l in enumerate(lines) if "# METER" in l), -1)
+        if meter_idx == -1: return f"Skipped: {name}"
+
+        # 1. Clean Metadata (Scrub # META block)
+        meta_raw = lines[:meter_idx]
+        cleaned_meta, in_meta_block = [], False
+        for line in meta_raw:
+            stripped = line.strip()
+            if stripped.startswith("# META"):
+                in_meta_block = True
+                continue 
+            if in_meta_block:
+                if stripped.startswith("#"):
+                    in_meta_block = False
+                    cleaned_meta.append(line)
+                continue 
+            cleaned_meta.append(line)
+
+        # 2. Filter Data Rows (Bottom-Up FALSE Gate)
+        data_rows_raw = [l.strip().split(',') for l in lines[meter_idx + 1:] if l.strip()]
+        filtered_rows, keep_gate = [], True 
+        for row in reversed(data_rows_raw):
+            if len(row) >= 8:
+                flag = row[7].strip().upper()
+                if flag == "FALSE": keep_gate = False
+                elif flag == "TRUE": keep_gate = True
+            if keep_gate: filtered_rows.append(row)
+        filtered_rows.reverse()
+
+        # 3. Separation & State Processing
+        overview_rows, valid_data = [], []
+        for row in filtered_rows:
+            if len(row) >= 8 and row[7].strip():
+                overview_rows.append(",".join(row) + "\n")
                 continue
-            if skip and s.startswith("#"):
-                skip = False
-                info.append(l)
-                continue
-            if not skip:
-                info.append(l)
+            if len(row) < 3 or not row[2].strip():
+                continue 
 
-        raw, overview = parse_data(lines, meter_idx)
-        if not raw:
-            return None
+            try:
+                v_val = float(row[1])
+                v_fixed = v_val / 1000.0 if v_val > 1.0 else v_val
+                row[1] = f"{v_fixed:.9f}"
+                current = (v_fixed - V_OFFSET) / R_MEAN
+                if len(row) > 3: row[3] = f"{current:.9f}"
+                else: row.append(f"{current:.9f}")
+                valid_data.append(row)
+            except (ValueError, IndexError):
+                pass
 
-        glitch_log = []
-        clean = glitch_correction(raw, name, glitch_log)
+        # 4. Generate # RESULTS (Sequential Blocks)
+        res_rows = []
+        if valid_data:
+            df = pd.DataFrame(valid_data)
+            df[0] = pd.to_datetime(df[0]) 
+            df[1] = df[1].astype(float)   
+            df[2] = df[2].astype(str)     
+            df['block'] = (df[2] != df[2].shift()).cumsum()
+            
+            for i, ((block_id, phase_name), group) in enumerate(df.groupby(['block', 2], sort=False)):
+                v_group = group[1]
+                elapsed_ms = (group[0].max() - group[0].min()).total_seconds() * 1000
+                
+                res_line = (f"{i}, {phase_name}, {v_group.mean():.9f}, {v_group.min():.9f}, "
+                            f"{v_group.max():.9f}, {v_group.max()-v_group.min():.9f}, "
+                            f"{v_group.std():.9f}, {elapsed_ms:.3f}\n")
+                res_rows.append(res_line)
 
-        stats = compute_stats(clean)
+        # 5. Final Assembly
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(cleaned_meta)
+            if overview_rows:
+                f.write("# OVERVIEW\n")
+                f.writelines(overview_rows)
+            if res_rows:
+                f.write("# RESULTS\n")
+                f.write(RESULTS_HEADER)
+                f.writelines(res_rows)
+            f.write("# METER\n")
+            f.write(METER_HEADER)
+            for row in valid_data:
+                f.write(",".join(row) + "\n")
 
-        write_file(path, lines, info, overview, raw, clean)
-
-        return {
-            "stats": {
-                "Protocol": protocol,
-                "Experiment": exp,
-                "Run": name,
-                "Samples_N": stats["n"],
-                "Samples_N_eff": stats["neff"],
-                "Vshunt_Mean_V": stats["series"].mean(),
-                "Vshunt_Median_V": stats["series"].median(),
-                "Vshunt_Max_V": stats["series"].max(),
-                "Vshunt_Min_V": stats["series"].min(),
-                "Vshunt_Combined_Uncert_V": stats["u"],
-                "Current_Mean_mA": stats["current"].mean() * 1000,
-            },
-            "glitches": glitch_log
-        }
+        return f"Processed: {name}"
 
     except Exception as e:
-        print(f"Error {name}: {e}")
-        return None
-
+        return f"Error {name}: {e}"
 
 def main():
-    print("-" * 50)
-    print("MASTER PROCESSOR RUN")
-    print("-" * 50)
-
-    os.makedirs(SUMMARY_DIR, exist_ok=True)
-
     tasks = []
     for p in PROTOCOLS:
         for e in EXPERIMENTS:
             folder = os.path.join(BASE_PATH, p, e)
-            if not os.path.exists(folder):
-                continue
+            if not os.path.exists(folder): continue
             for f in os.listdir(folder):
                 if f.endswith(".csv"):
                     tasks.append((p, e, f, os.path.join(folder, f)))
 
-    results = []
-    glitches = []
-
-    with concurrent.futures.ProcessPoolExecutor() as ex:
-        for r in ex.map(process_single_file, tasks):
-            if r:
-                results.append(r["stats"])
-                glitches.extend(r["glitches"])
-
-    if results:
-        pd.DataFrame(results).to_csv(SUMMARY_PATH, index=False)
-        print("DONE")
-        print(len(glitches), "magnitude errors detected")
-
+    print(f"Executing on {len(tasks)} files...")
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        results = list(executor.map(process_single_file, tasks))
+    print("Success. Headers and sequential results integrated.")
 
 if __name__ == "__main__":
     main()
