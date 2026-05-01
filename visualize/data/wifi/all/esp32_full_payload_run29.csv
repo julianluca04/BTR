@@ -1,5 +1,4 @@
 # INFO
-Calibration: R=1.134584Ohm, Offset=-0.0022mV, Vsrc=5.020379V, Logic=7.5xAboveBelowMinNeighbor
 # EVENTS
 run,payload_size,declared_size,bytes_received,tx_start,rx_end,complete,verified,skip_reason
 
