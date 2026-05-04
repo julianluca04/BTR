@@ -6,7 +6,7 @@ import numpy as np
 R_MEAN = 1.134584
 V_OFFSET = -0.002182e-3
 
-INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/experiments/WiFi/experiment 1 (all in one)/data/esp32/full_payload/proper run"
+INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/experiments/overnight/experiment 1 (all in one)/data/esp32/full_payload/best"
 OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/clean data"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -227,7 +227,7 @@ def process_file(filepath):
             run_id = parts[1].strip()
             break
 
-    out_name = f"ble_nrf52_full_payload_clean_run_{run_id}.csv"
+    out_name = f"esp32_full_payload_clean_run_{run_id}.csv"
     out_path = os.path.join(OUTPUT_DIR, out_name)
 
     # --- Write output ---
