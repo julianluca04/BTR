@@ -188,7 +188,7 @@ def plot(time, mean, std, phase_marks):
 
     # --- labels ---
     ax.set_ylabel("Voltage (V)")
-    ax.set_title("Phase-aligned Average Power Trace")
+    ax.set_title("Phase-aligned Average Power Trace BLE") 
 
     # --- remove normal x label ---
     ax.set_xlabel("")
