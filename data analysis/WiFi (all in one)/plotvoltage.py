@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/clean data"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/clean data"
 DT = 0.002  # resampling resolution (seconds)
 
 # -----------------------
@@ -116,6 +116,9 @@ def build_global_signal(aligned_segments):
     """
     Stitch segments back into one continuous signal
     """
+    if aligned_segments and aligned_segments[-1]["phase"] == "idle":
+        aligned_segments = aligned_segments[:-1]
+
     mean_all = []
     std_all = []
     time_all = []
@@ -186,7 +189,7 @@ def plot(time, mean, std, phase_marks):
     ax.set_xlim(time[0], time[-1])
 
     ax.set_ylabel("Voltage (V)")
-    ax.set_title("Phase-aligned Average Power Trace BLE", fontweight="bold")
+    ax.set_title("Phase-aligned Average Power Trace WiFi", fontweight="bold")
 
     ax.set_xlabel("")
     ax.annotate(
