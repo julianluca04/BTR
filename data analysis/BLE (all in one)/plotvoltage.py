@@ -4,9 +4,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-DATA_DIR = "/path/to/your/cleaned/files"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/clean data"
+DT = 0.002  # resampling resolution (seconds)
 
 # -----------------------
+
 
 def load_runs(folder):
     runs = []
@@ -17,82 +19,190 @@ def load_runs(folder):
 
         path = os.path.join(folder, f)
 
-        with open(path, "r") as file:
+        with open(path) as file:
             lines = file.readlines()
-
+            
         # find meter section
         meter_idx = next(i for i, l in enumerate(lines) if "# METER" in l)
+        # header is the NEXT line
+        header_line = meter_idx + 1
+         
+        # read CSV properly
+        df = pd.read_csv(path, skiprows=header_line )
+        
+        # 🔥 force correct column names (in case pandas messes up)
+        df.columns = [c.strip() for c in df.columns]
+        if "timestamp" not in df.columns:
+            print(f"Bad columns in {path}: {df.columns}")
+            raise ValueError("CSV parsing failed")
 
-        df = pd.read_csv(
-            path,
-            skiprows=meter_idx + 2,  # skip header lines
-        )
-
-        # clean
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed", errors="coerce")
         df["v_shunt"] = df["v_shunt"].astype(float)
 
-        # align time
-        t0 = df["timestamp"].iloc[0]
-        df["time_s"] = (df["timestamp"] - t0).dt.total_seconds()
+        # --- normalize time: first NON-baseline = t0 ---
+        first_active = df[df["phase"] != "baseline"]["timestamp"].iloc[0]
+        df["time_s"] = (df["timestamp"] - first_active).dt.total_seconds()
 
         runs.append(df)
 
     return runs
 
 
-def resample_runs(runs, dt=0.01):
+def split_by_phase(df):
     """
-    Resample all runs onto common time axis
+    Split into sequential phase blocks
+    """
+    df["block"] = (df["phase"] != df["phase"].shift()).cumsum()
+
+    segments = []
+    for (_, phase), group in df.groupby(["block", "phase"], sort=False):
+        segments.append({
+            "phase": phase,
+            "time": group["time_s"].values,
+            "v": group["v_shunt"].values
+        })
+
+    return segments
+
+
+def resample_segment(time, values, n_points=200):
+    """
+    Resample each segment to fixed length
+    """
+    t_norm = np.linspace(time.min(), time.max(), n_points)
+    v_interp = np.interp(t_norm, time, values)
+    return t_norm, v_interp
+
+
+def align_runs_by_phase(runs):
+    """
+    Align all runs phase-by-phase
     """
 
-    max_time = max(r["time_s"].max() for r in runs)
-    common_time = np.arange(0, max_time, dt)
+    all_segment_lists = [split_by_phase(r) for r in runs]
 
-    aligned = []
+    # assume same phase order across runs
+    n_segments = min(len(s) for s in all_segment_lists)
 
-    for df in runs:
-        interp = np.interp(
-            common_time,
-            df["time_s"],
-            df["v_shunt"]
-        )
-        aligned.append(interp)
+    aligned_segments = []
 
-    aligned = np.array(aligned)
+    for i in range(n_segments):
+        phase = all_segment_lists[0][i]["phase"]
 
-    mean = aligned.mean(axis=0)
-    std = aligned.std(axis=0)
+        resampled = []
 
-    return common_time, mean, std
+        for run_segments in all_segment_lists:
+            seg = run_segments[i]
+
+            t, v = resample_segment(seg["time"], seg["v"])
+            resampled.append(v)
+
+        resampled = np.array(resampled)
+
+        mean = resampled.mean(axis=0)
+        std = resampled.std(axis=0)
+
+        aligned_segments.append({
+            "phase": phase,
+            "mean": mean,
+            "std": std,
+            "length": len(mean)
+        })
+
+    return aligned_segments
 
 
-def extract_phase_changes(df):
+def build_global_signal(aligned_segments):
     """
-    Get phase transition times from ONE run (they should be similar)
+    Stitch segments back into one continuous signal
     """
-    changes = df["phase"] != df["phase"].shift()
+    mean_all = []
+    std_all = []
+    time_all = []
+    phase_marks = []
 
-    return df.loc[changes, ["time_s", "phase"]]
+    t_cursor = 0
+
+    for seg in aligned_segments:
+        n = seg["length"]
+
+        t = np.linspace(0, n * DT, n) + t_cursor
+
+        mean_all.extend(seg["mean"])
+        std_all.extend(seg["std"])
+        time_all.extend(t)
+
+        phase_marks.append((t_cursor, seg["phase"]))
+
+        t_cursor = t[-1]
+
+    return np.array(time_all), np.array(mean_all), np.array(std_all), phase_marks
 
 
-def plot(mean_time, mean, std, phase_changes):
-    plt.figure()
+def plot(time, mean, std, phase_marks):
+    fig, ax = plt.subplots(figsize=(16, 6))
 
-    # mean line
-    plt.plot(mean_time, mean)
+    # --- mean + std ---
+    ax.plot(time, mean, linewidth=2, color="deeppink")
+    ax.fill_between(time, mean - std, mean + std, alpha=0.4, color="deeppink")
 
-    # std area
-    plt.fill_between(mean_time, mean - std, mean + std, alpha=0.3)
+    # --- shaded phase regions ---
+    for i in range(len(phase_marks)):
+        t_start, phase = phase_marks[i]
 
-    # phase lines
-    for _, row in phase_changes.iterrows():
-        plt.axvline(x=row["time_s"], linestyle="--")
+        if i < len(phase_marks) - 1:
+            t_end = phase_marks[i + 1][0]
+        else:
+            t_end = time[-1]
 
-    plt.xlabel("Time (s)")
-    plt.ylabel("Voltage (V)")
-    plt.title("Average Power Trace (BLE runs)")
+        # shade idle differently
+        if "idle" in phase:
+            ax.axvspan(t_start, t_end, alpha=0.15, color="hotpink")
+        elif "baseline" in phase:
+            ax.axvspan(t_start, t_end, alpha=0.08, color="hotpink")
+        else:
+            ax.axvspan(t_start, t_end, alpha=0.05, color="hotpink")
 
+    # --- phase labels on x-axis ---
+    xticks = []
+    xlabels = []
+
+    for i in range(len(phase_marks)):
+        t_start, phase = phase_marks[i]
+
+        if i < len(phase_marks) - 1:
+            t_end = phase_marks[i + 1][0]
+        else:
+            t_end = time[-1]
+
+        center = (t_start + t_end) / 2
+
+        xticks.append(center)
+        xlabels.append(phase)
+
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xlabels, rotation=45, ha="right")
+
+    # --- remove x-axis blank space ---
+    ax.set_xlim(time[0], time[-1])
+
+    # --- labels ---
+    ax.set_ylabel("Voltage (V)")
+    ax.set_title("Phase-aligned Average Power Trace")
+
+    # --- remove normal x label ---
+    ax.set_xlabel("")
+
+    # --- add time arrow ---
+    ax.annotate(
+        "Time →",
+        xy=(1.0, -0.15),
+        xycoords="axes fraction",
+        ha="right",
+        fontsize=12
+    )
+
+    plt.tight_layout()
     plt.show()
 
 
@@ -101,13 +211,11 @@ def main():
 
     print(f"Loaded {len(runs)} runs")
 
-    # align + average
-    t, mean, std = resample_runs(runs)
+    aligned_segments = align_runs_by_phase(runs)
 
-    # use first run for phase markers
-    phase_changes = extract_phase_changes(runs[0])
+    t, mean, std, phase_marks = build_global_signal(aligned_segments)
 
-    plot(t, mean, std, phase_changes)
+    plot(t, mean, std, phase_marks)
 
 
 if __name__ == "__main__":
