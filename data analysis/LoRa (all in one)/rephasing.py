@@ -89,6 +89,10 @@ def process_file(path):
     df = pd.read_csv(path, skiprows=header_line)
     df.columns = [c.strip() for c in df.columns]
 
+    # --- drop LoRa-only power phase metadata ---
+    if "power_phase" in df.columns:
+        df = df.drop(columns=["power_phase"])
+
     # --- apply new phase logic ---
     df = reassign_phases(df)
 
