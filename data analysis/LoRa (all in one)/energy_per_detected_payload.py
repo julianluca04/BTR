@@ -7,9 +7,11 @@ import matplotlib.pyplot as plt
 DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/clean data"
 
 
-# ---------------- PARSE FILE ----------------
+# ---------------- HELPERS ----------------
 
 def parse_file(path):
+    df = None
+
     with open(path, "r") as f:
         lines = f.readlines()
 
@@ -28,11 +30,27 @@ def parse_file(path):
     return df
 
 
-# ---------------- TX SEGMENT DETECTION ----------------
+def compute_energy_segment(seg):
+    if len(seg) < 2:
+        return np.nan
+
+    seg = seg.sort_values("timestamp")
+
+    t = (seg["timestamp"] - seg["timestamp"].iloc[0]).dt.total_seconds().values
+    p = seg["v_shunt"].values * seg["current"].values
+
+    return np.trapz(p, t)
+
+
+# ---------------- DETECT TX SEGMENTS ----------------
 
 def extract_tx_segments(df):
+    """
+    Find contiguous TX regions using power_phase
+    """
     df = df.copy()
 
+    # TX = anything containing 'tx'
     df["is_tx"] = df["power_phase"].str.contains("tx")
 
     # group contiguous regions
@@ -44,9 +62,11 @@ def extract_tx_segments(df):
         if not is_tx:
             continue
 
-        # detect payload from label
+        # extract payload from label
+        phases = group["power_phase"].unique()
+
         payload = None
-        for p in group["power_phase"].unique():
+        for p in phases:
             if "tx_" in p:
                 try:
                     payload = int(p.split("tx_")[-1])
@@ -65,21 +85,7 @@ def extract_tx_segments(df):
     return segments
 
 
-# ---------------- ENERGY ----------------
-
-def compute_energy(seg):
-    if len(seg) < 2:
-        return np.nan
-
-    seg = seg.sort_values("timestamp")
-
-    t = (seg["timestamp"] - seg["timestamp"].iloc[0]).dt.total_seconds().values
-    p = seg["v_shunt"].values * seg["current"].values
-
-    return np.trapz(p, t)
-
-
-# ---------------- MAIN ----------------
+# ---------------- MAIN ANALYSIS ----------------
 
 def process_all():
     results = []
@@ -94,91 +100,121 @@ def process_all():
         segments = extract_tx_segments(df)
 
         for seg in segments:
-            E = compute_energy(seg["data"])
+            energy = compute_energy_segment(seg["data"])
 
-            if np.isnan(E):
+            if np.isnan(energy):
                 continue
 
-            payload = seg["payload"]
-
-            # energy per bit
-            Eb = E / (payload * 8)
-
             results.append({
-                "payload": payload,
-                "energy_J": E,
-                "energy_per_bit": Eb
+                "payload": seg["payload"],
+                "energy_J": energy
             })
 
     return pd.DataFrame(results)
 
 
-# ---------------- SUMMARY ----------------
+# ---------------- STATS ----------------
 
 def summarize(df):
     summary = df.groupby("payload").agg(
-        mean_Eb=("energy_per_bit", "mean"),
-        std_Eb=("energy_per_bit", "std"),
-        count=("energy_per_bit", "count")
+        mean_energy=("energy_J", "mean"),
+        std_energy=("energy_J", "std"),
+        count=("energy_J", "count")
     ).reset_index()
 
-    summary["ci95"] = 1.96 * summary["std_Eb"] / np.sqrt(summary["count"])
+    summary["ci95"] = 1.96 * summary["std_energy"] / np.sqrt(summary["count"])
 
     return summary.sort_values("payload")
 
 
 # ---------------- PLOT ----------------
+def plot(summary):
+    fig, ax = plt.subplots(figsize=(12, 6))
 
-def plot(summary, title_suffix=""):
-
+    # --- map payloads to evenly spaced positions ---
     x = np.arange(len(summary))
 
-    plt.figure(figsize=(10, 6))
-
-    plt.errorbar(
+    ax.errorbar(
         x,
-        summary["mean_Eb"] * 1e6,      # µJ/bit
-        yerr=summary["ci95"] * 1e6,
+        summary["mean_energy"] * 1000,  # mJ
+        yerr=summary["ci95"] * 1000,
         fmt="o-",
-        capsize=4,
+        capsize=5,
         linewidth=2,
-        elinewidth=1.5,
         color="deeppink",
         markerfacecolor="deeppink"
     )
 
-    plt.xticks(x, summary["payload"], rotation=45)
+    # --- categorical x-axis ---
+    ax.set_xticks(x)
+    ax.set_xticklabels(summary["payload"])
 
-    plt.xlabel("Payload size (bytes)")
-    plt.ylabel("Energy per bit (µJ/bit)")
-    plt.title(f"LoRa Energy Efficiency vs Payload Size (Detected TX){title_suffix}")
+    ax.set_xlabel("Payload size (bytes)")
+    ax.set_ylabel("Energy (mJ)")
+    ax.set_title("LoRa Energy per detected TX Event (from power peaks)", fontweight="bold")
 
-    plt.grid(True, alpha=0.4)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    # --- INSET ZOOM for low payload sizes ---
+    # Find indices where payload <= 8
+    low_payload_mask = summary["payload"] <= 8
+    low_indices = np.where(low_payload_mask)[0]
+
+    if len(low_indices) > 0:
+        from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+
+        axins = inset_axes(ax, width=4.5, height=1.8, loc="upper center", borderpad=2) 
+
+
+
+        axins.errorbar(
+            range(len(low_indices)),
+            summary.iloc[low_indices]["mean_energy"].values * 1000,
+            yerr=summary.iloc[low_indices]["ci95"].values * 1000,
+            fmt="o-",
+            capsize=4,
+            linewidth=2,
+            elinewidth=1.5,
+            color="deeppink",
+            markerfacecolor="deeppink"
+        )
+
+        axins.set_xticks(range(len(low_indices)))
+        axins.set_xticklabels(summary.iloc[low_indices]["payload"].values, fontsize=8)
+        axins.set_ylabel("Energy (mJ)", fontsize=8)
+        axins.set_xlabel("Payload (bytes)", fontsize=8)
+        axins.tick_params(labelsize=7)
+        axins.grid(True, alpha=0.3)
+
+        # Draw rectangle on main plot to show zoom region
+        from matplotlib.patches import Rectangle
+        x_min = low_indices[0] - 0.5
+        x_max = low_indices[-1] + 0.5
+        y_min = 0
+        y_max = summary.iloc[low_indices]["mean_energy"].max() * 1000 * 1.2
+
+        rect = Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, 
+                         linewidth=1.5, edgecolor="deeppink", facecolor="hotpink",
+                         linestyle="--", alpha=0.3)
+        ax.add_patch(rect)
+
 
     plt.tight_layout()
     plt.show()
-
 
 # ---------------- RUN ----------------
 
 def main():
     df = process_all()
 
-    print("\n=== RAW ENERGY PER BIT DATA (LoRa TX only) ===")
+    print("\n=== RAW DETECTED TX EVENTS ===")
     print(df.head())
 
     summary = summarize(df)
 
-    print("\n=== SUMMARY ===")
+    print("\n=== SUMMARY BY PAYLOAD (DETECTED) ===")
     print(summary.to_string(index=False))
 
     plot(summary)
-
-    # optional: remove payload 1 if it is noisy
-    summary_no_small = summary[summary["payload"] > 1].reset_index(drop=True)
-
-    if not summary_no_small.empty:
-        plot(summary_no_small, title_suffix=" (excluding payload = 1)")
 
 
 if __name__ == "__main__":
