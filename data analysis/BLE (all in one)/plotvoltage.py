@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/clean data"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/rephased data"
 DT = 0.002  # resampling resolution (seconds)
 
 # -----------------------
@@ -116,6 +116,9 @@ def build_global_signal(aligned_segments):
     """
     Stitch segments back into one continuous signal
     """
+    if aligned_segments and aligned_segments[-1]["phase"] == "idle":
+        aligned_segments = aligned_segments[:-1]
+
     mean_all = []
     std_all = []
     time_all = []
@@ -146,7 +149,7 @@ def plot(time, mean, std, phase_marks):
     ax.plot(time, mean, linewidth=2, color="deeppink")
     ax.fill_between(time, mean - std, mean + std, alpha=0.4, color="deeppink")
 
-    # --- shaded phase regions ---
+    # --- alternating shaded phase regions ---
     for i in range(len(phase_marks)):
         t_start, phase = phase_marks[i]
 
@@ -155,15 +158,13 @@ def plot(time, mean, std, phase_marks):
         else:
             t_end = time[-1]
 
-        # shade idle differently
-        if "idle" in phase:
+        # alternate shading
+        if i % 2 == 0:
             ax.axvspan(t_start, t_end, alpha=0.15, color="hotpink")
-        elif "baseline" in phase:
-            ax.axvspan(t_start, t_end, alpha=0.08, color="hotpink")
         else:
-            ax.axvspan(t_start, t_end, alpha=0.05, color="hotpink")
+            ax.axvspan(t_start, t_end, alpha=0.08, color="hotpink")
 
-    # --- phase labels on x-axis ---
+    # --- phase labels ---
     xticks = []
     xlabels = []
 
@@ -186,7 +187,7 @@ def plot(time, mean, std, phase_marks):
     ax.set_xlim(time[0], time[-1])
 
     ax.set_ylabel("Voltage (V)")
-    ax.set_title("Phase-aligned Average Power Trace BLE", fontweight="bold")
+    ax.set_title("Phase-aligned Average Voltage Trace BLE")
 
     ax.set_xlabel("")
     ax.annotate(
