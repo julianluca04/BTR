@@ -38,13 +38,15 @@ PICO_PORT       = '/dev/cu.usbmodem11301'
 PICO_BAUD       = 115200
 NRF_ADDRESS     = "1385E324-4660-24ED-9B2E-A55F8DF154AE"
 NUS_TX_UUID     = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
-NRF_SKETCH_SRC  = '/Users/foml/coding/MSP/year_3/BTR/experiments/BLE/experiment 2 (byte-for-byte)/ble_2'
+NRF_SKETCH_SRC  = '/Users/foml/coding/MSP/year_3/BTR/experiments/BLE/new-experiment 2 (byte-for-byte)/ble_2'
+PICO_SKETCH_SRC = '/Users/foml/coding/MSP/year_3/BTR/experiments/BLE/new-experiment 2 (byte-for-byte)/Pico_2'
+PICO_FQBN       = 'arduino:mbed_rp2040:pico'
 NRF_FQBN        = 'Seeeduino:nrf52:xiaonRF52840Sense'
 NRF_PORT        = '/dev/cu.usbmodem11101'
 SAFE_BUILD_BASE = '/tmp/ble_upload_tmp'
 
 BLE_TIMEOUT_MIN = 90    # floor timeout (seconds) regardless of payload size
-BLE_MS_PER_BYTE = 10    # 2× the 5 ms pacing delay — used to scale per-payload timeout
+BLE_MS_PER_BYTE = 15    # ~10 ms per byte (BLE TX queue + UART round-trip)
 IDLE_S          = 1.0
 BASELINE_S      = 5.0
 METER_WARMUP_S  = 2.0
@@ -174,86 +176,59 @@ def upload_nrf():
     time.sleep(5)
 
 
-def flash_pico():
-    """Flash main.py onto the Pico and return the open serial port.
+def upload_pico():
+    print("\n[→] Compiling & uploading Pico sketch...")
+    sketch = PICO_SKETCH_SRC
+    if " " in sketch or "(" in sketch or ")" in sketch:
+        name = os.path.basename(os.path.normpath(sketch))
+        safe = os.path.join(SAFE_BUILD_BASE, name)
+        if os.path.exists(safe):
+            shutil.rmtree(safe)
+        shutil.copytree(sketch, safe)
+        sketch = safe
+        print(f"[→] Copied to: {sketch}")
+    run_cmd(["arduino-cli", "compile", "--fqbn", PICO_FQBN, sketch])
+    rc = run_cmd(["arduino-cli", "upload", "-p", PICO_PORT, "-b", PICO_FQBN, sketch], check=False)
+    if rc != 0:
+        print("[!] Upload failed — hold BOOTSEL on Pico, press ENTER")
+        input("    → ")
+        time.sleep(1)
+        run_cmd(["arduino-cli", "upload", "-p", PICO_PORT, "-b", PICO_FQBN, sketch])
+    print("[✓] Pico uploaded. Waiting 3s to boot...")
+    time.sleep(3)
 
-    The port is kept open so that the 'READY' line printed by the new
-    main.py during boot is not lost when the port is closed/reopened.
-    The caller is responsible for closing the returned Serial object.
-    """
-    print("\n[→] Flashing Pico via raw REPL...")
-    ser = None
-    for attempt in range(10):
+
+def open_pico_serial():
+    """Open Pico serial, return (port, pico_ready). Retries until enumerated."""
+    pico = None
+    for attempt in range(20):
         try:
-            ser = serial.Serial(PICO_PORT, PICO_BAUD, timeout=2)
+            pico = serial.Serial(PICO_PORT, PICO_BAUD, timeout=15)
             break
         except serial.SerialException:
             if attempt == 0:
                 ports = [p.device for p in serial.tools.list_ports.comports()]
-                print(f"[!] Pico not found at {PICO_PORT}.")
-                print(f"    Available ports: {ports}")
+                print(f"[!] Pico not found at {PICO_PORT}. Available: {ports}")
                 print(f"    Plug in the Pico — retrying every 2s...")
             time.sleep(2)
-    if ser is None:
-        raise RuntimeError(f"Could not open Pico port {PICO_PORT} after 10 attempts.")
-
-    # Interrupt whatever is running
-    for _ in range(20):
-        ser.write(b'\x03')
-        time.sleep(0.05)
-    time.sleep(0.5)
-    ser.reset_input_buffer()
-
-    # Enter raw REPL
-    ser.write(b'\x01')
-    time.sleep(1.0)  # give it time to respond
-    response = ser.read(ser.in_waiting)
-    print(f"[REPL] {response}")
-
-    if b'raw REPL' not in response:
-        print("[!] Trying Ctrl+B → Ctrl+D → Ctrl+A...")
-        ser.write(b'\x02')  # exit any REPL mode first
-        time.sleep(0.5)
-        ser.write(b'\x04')  # soft reboot
-        time.sleep(3.0)     # wait for boot
-        ser.reset_input_buffer()
-        ser.write(b'\x01')  # enter raw REPL
-        time.sleep(1.0)
-        response = ser.read(ser.in_waiting)
-        print(f"[REPL2] {response}")
-
-    if b'raw REPL' not in response:
-        ser.close()
-        raise RuntimeError("Could not enter raw REPL")
-
-    escaped = PICO_CODE.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n')
-    cmd = f"f=open('main.py','w');f.write('{escaped}');f.close()\x04"
-    ser.write(cmd.encode())
-    time.sleep(3)
-    response = ser.read(ser.in_waiting)
-    print(f"[Write] {response}")
-
-    ser.write(b'\x02')  # exit raw REPL
-    time.sleep(0.5)
-    ser.write(b'\x04')  # soft reboot into main.py
-
-    # Keep the port open and wait for READY so the line isn't lost.
-    print("[→] Waiting for Pico READY (on flash connection)...")
-    ser.timeout = 15
+    if pico is None:
+        raise RuntimeError(f"Could not open Pico port {PICO_PORT}.")
+    pico.reset_input_buffer()
+    print("[→] Waiting for Pico READY (up to 30s)...")
     deadline = time.time() + 30
+    last = ""
     while time.time() < deadline:
-        if ser.in_waiting:
-            line = ser.readline().decode(errors='replace').strip()
-            if line:
+        if pico.in_waiting:
+            line = pico.readline().decode(errors="replace").strip()
+            if line and line != last:
                 print(f"[Pico] {line}")
+                last = line
             if line == "READY":
-                print("[✓] Pico flashed and ready.")
-                return ser
+                print("[✓] Pico ready.")
+                return pico, True
         time.sleep(0.05)
-
-    ser.close()
-    raise RuntimeError("Pico did not print READY after flashing")
-
+    print("[!] Pico READY timeout — will wait at run start.")
+    return pico, False
 
 def wait_for_line(pico, expected, timeout=30):
     deadline = time.time() + timeout
@@ -482,6 +457,7 @@ async def run_ble_test_async(pico, write_event_row):
         # Wait for the notification subscription to be fully active on the nRF
         # side before sending 'go'. Without this the first SIZE notification
         # fires before the queue is ready and is silently dropped.
+        # Wait for subscription to be fully active on nRF before sending go.
         await asyncio.sleep(1.0)
 
         pico.reset_input_buffer()
@@ -695,42 +671,12 @@ def run_experiment(run_number, meter, pico, loop, pico_already_ready=False):
 if __name__ == "__main__":
     meter = connect_meter()
 
-    do_upload = input("\nUpload nRF + flash Pico? [y/n] → ").strip().lower()
-
+    do_upload = input("\nUpload nRF + Pico? [y/n] → ").strip().lower()
     if do_upload in ("y", "yes"):
         upload_nrf()
-        pico = flash_pico()   # returns open port, already confirmed READY
-        pico_ready = True
-    else:
-        # Devices already programmed — just open the serial port and soft-reboot
-        # the Pico so it re-runs the existing main.py cleanly.
-        print(f"\n[→] Opening Pico serial (skip flash)...")
-        pico = None
-        for attempt in range(10):
-            try:
-                pico = serial.Serial(PICO_PORT, PICO_BAUD, timeout=15)
-                break
-            except serial.SerialException:
-                if attempt == 0:
-                    ports = [p.device for p in serial.tools.list_ports.comports()]
-                    print(f"[!] Pico not found at {PICO_PORT}. Available: {ports}")
-                    print(f"    Plug in the Pico — retrying every 2s...")
-                time.sleep(2)
-        if pico is None:
-            raise RuntimeError(f"Could not open Pico port {PICO_PORT}.")
-        # Interrupt any running code, then soft-reboot to run main.py
-        for _ in range(3):
-            pico.write(b'\x03')
-            time.sleep(0.1)
-        time.sleep(0.5)
-        pico.reset_input_buffer()
-        pico.write(b'\x04')   # Ctrl+D soft reboot
-        print("[→] Waiting for Pico READY...")
-        pico_ready = wait_for_line(pico, "READY", timeout=15)
-        if pico_ready:
-            print("[✓] Pico ready.")
-        else:
-            print("[!] Pico did not send READY — will wait at run start.")
+        upload_pico()
+
+    pico, pico_ready = open_pico_serial()
 
     # Persistent event loop reused across all runs
     loop = asyncio.new_event_loop()
