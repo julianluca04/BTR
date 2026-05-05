@@ -108,27 +108,23 @@ def summarize(df):
 
 # ---------------- PLOT ----------------
 
-def plot(summary, title_suffix=""):
+def plot(summary):
 
     plt.figure(figsize=(10, 6))
 
     plt.errorbar(
         range(len(summary)),
-        summary["mean_Eb"] * 1e6,
-        yerr=summary["ci95"] * 1e6,
+        summary["mean_Eb"],
+        yerr=summary["ci95"],
         fmt="o-",
-        capsize=4,
-        linewidth=2,
-        elinewidth=1.5,
-        color="deeppink",
-        markerfacecolor="deeppink"
+        capsize=4
     )
 
     plt.xticks(range(len(summary)), summary["payload"], rotation=45)
 
     plt.xlabel("Payload size (bytes)")
-    plt.ylabel("Energy per bit (µJ/bit)")
-    plt.title(f"BLE Energy Efficiency vs Payload Size{title_suffix}")
+    plt.ylabel("Energy per bit (J/bit)")
+    plt.title("BLE Energy Efficiency vs Payload Size")
 
     plt.grid(True, alpha=0.4)
 
@@ -150,10 +146,6 @@ def main():
     print(summary.to_string(index=False))
 
     plot(summary)
-
-    summary_no_tx1 = summary[summary["payload"] != 1].reset_index(drop=True)
-    if not summary_no_tx1.empty:
-        plot(summary_no_tx1, title_suffix=" (excluding payload 1)")
 
 
 if __name__ == "__main__":
