@@ -12,7 +12,50 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 METER_HEADER = "timestamp,v_shunt,current\n"
 
+TRIM_START_RATIO = 0.05
+TRIM_END_RATIO = 0.4
+
 # ---------------- HELPERS ----------------
+
+def trim_start(df, ratio):
+    """
+    Remove first X% of the signal
+    """
+    if df.empty:
+        return df
+
+    df = df.sort_values("timestamp").copy()
+
+    t0 = df["timestamp"].iloc[0]
+    df["time_s"] = (df["timestamp"] - t0).dt.total_seconds()
+
+    max_time = df["time_s"].max()
+    cutoff = max_time * ratio
+
+    df = df[df["time_s"] >= cutoff]
+
+    return df.drop(columns=["time_s"])
+
+def trim_end(df, ratio):
+    """
+    Remove last X% of the signal
+    """
+    if df.empty:
+        return df
+
+    df = df.sort_values("timestamp").copy()
+
+    t0 = df["timestamp"].iloc[0]
+    df["time_s"] = (df["timestamp"] - t0).dt.total_seconds()
+
+    max_time = df["time_s"].max()
+    cutoff = max_time * (1 - ratio)
+
+    # keep only up to cutoff
+    df = df[df["time_s"] <= cutoff]
+
+    return df.drop(columns=["time_s"])
+
 
 def parse_file(path):
     with open(path, "r") as f:
@@ -79,8 +122,14 @@ def parse_file(path):
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"])
 
-    # --- Compute current ---
-    df["current"] = (df["v_shunt"] - V_OFFSET) / R_MEAN
+    # --- CORRECT VOLTAGE ---
+    df["v_shunt"] = df["v_shunt"] - V_OFFSET
+    # --- COMPUTE CURRENT ---
+    df["current"] = df["v_shunt"] / R_MEAN
+
+    # --- TRIM IDLE ---
+    df = trim_start(df, TRIM_START_RATIO)
+    df = trim_end(df, TRIM_END_RATIO)
 
     return df, boot_number, meta
 
