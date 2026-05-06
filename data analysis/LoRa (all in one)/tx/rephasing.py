@@ -2,8 +2,8 @@ import os
 import pandas as pd
 
 # ---------------- CONFIG ----------------
-INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/first processing/clean data"
-OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/rephased data"
+INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/first processing/clean data"
+OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/rephased data"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -112,7 +112,7 @@ def process_file(path):
                 f"{row['timestamp']},{row['v_shunt']},{row['phase']},{row['current']}\n"
             )
 
-    return f"Processed {name}"
+    return f"Processed {name}, saved to {out_path}"
 
 
 # ---------------- RUN ----------------

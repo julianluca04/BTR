@@ -7,7 +7,7 @@ R_MEAN = 1.134584
 V_OFFSET = -0.002182e-3
 
 INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/experiments/BLE/experiment 1 (all in one)/data/ble_nrf52/full_payload/20260413_153849"
-OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/clean data"
+OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/first processing/clean data"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -198,8 +198,10 @@ def process_file(filepath):
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     df["v_shunt"] = df["v_shunt"].astype(float)
 
+    # --- Correct voltage ---
+    df["v_shunt"] = df["v_shunt"] - V_OFFSET
     # --- Compute current ---
-    df["current"] = (df["v_shunt"] - V_OFFSET) / R_MEAN
+    df["current"] = df["v_shunt"] / R_MEAN
 
     # --- Compute power-based phase ---
     #df["power_phase"] = compute_power_phase(df, events)

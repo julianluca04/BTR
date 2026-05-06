@@ -2,8 +2,8 @@ import os
 import pandas as pd
 
 # ---------------- CONFIG ----------------
-INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/first processing/clean data"
-OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/rephased data"
+INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/first processing/clean data"
+OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/rephased data"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
