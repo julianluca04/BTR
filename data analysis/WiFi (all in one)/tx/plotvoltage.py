@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/rephased data"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/rephased data"
 DT = 0.002  # resampling resolution (seconds)
 
 # -----------------------

@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/rephased data"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/rephased data"
 DT = 0.002  # resampling resolution (seconds)
 
 # -----------------------
@@ -146,8 +146,8 @@ def plot(time, mean, std, phase_marks):
     fig, ax = plt.subplots(figsize=(16, 6))
 
     # --- mean + std ---
-    ax.plot(time, mean, linewidth=2, color="deeppink")
-    ax.fill_between(time, mean - std, mean + std, alpha=0.4, color="deeppink")
+    ax.plot(time, mean, linewidth=2, color="lightseagreen")
+    ax.fill_between(time, mean - std, mean + std, alpha=0.4, color="lightseagreen")
 
     # --- alternating shaded phase regions ---
     for i in range(len(phase_marks)):
@@ -160,9 +160,9 @@ def plot(time, mean, std, phase_marks):
 
         # alternate shading
         if i % 2 == 0:
-            ax.axvspan(t_start, t_end, alpha=0.15, color="hotpink")
+            ax.axvspan(t_start, t_end, alpha=0.18, color="paleturquoise")
         else:
-            ax.axvspan(t_start, t_end, alpha=0.08, color="hotpink")
+            ax.axvspan(t_start, t_end, alpha=0.08, color="paleturquoise")
 
     # --- phase labels ---
     xticks = []

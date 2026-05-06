@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # ---------------- CONFIG ----------------
-DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/rephased data"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/rephased data"
 
 R_MEAN = 1.134584
 V_OFFSET = -0.002182e-3

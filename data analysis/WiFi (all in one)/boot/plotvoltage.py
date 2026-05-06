@@ -81,7 +81,7 @@ def plot(t, mean, std):
 
     plt.xlabel("Normalized Time")
     plt.ylabel("Voltage (V)")
-    plt.title("WiFi Boot Average Voltage Trace (Mean ± Std)")
+    plt.title("WiFi Boot Average Voltage Trace with idle trimmed (Mean ± Std)")
 
     plt.grid(True, alpha=0.3)
     plt.tight_layout()

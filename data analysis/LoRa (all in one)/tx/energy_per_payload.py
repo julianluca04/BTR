@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # ---------------- CONFIG ----------------
-DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/rephased data"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/rephased data"
 
 R_MEAN = 1.134584
 V_OFFSET = -0.002182e-3
@@ -165,8 +165,8 @@ def plot(summary):
         capsize=5,
         linewidth=2,
         elinewidth=1.5,
-        color="deeppink",
-        markerfacecolor="deeppink"
+        color="tomato",
+        markerfacecolor="tomato"
     )
 
     ax.set_xticks(range(len(summary)))
@@ -196,8 +196,8 @@ def plot(summary):
             capsize=4,
             linewidth=2,
             elinewidth=1.5,
-            color="deeppink",
-            markerfacecolor="deeppink"
+            color="tomato",
+            markerfacecolor="tomato"
         )
 
         axins.set_xticks(range(len(low_indices)))
@@ -215,7 +215,7 @@ def plot(summary):
         y_max = summary.iloc[low_indices]["mean_energy"].max() * 1000 * 1.2
 
         rect = Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, 
-                         linewidth=1.5, edgecolor="deeppink", facecolor="hotpink",
+                         linewidth=1.5, edgecolor="tomato", facecolor="coral",
                          linestyle="--", alpha=0.3)
         ax.add_patch(rect)
 

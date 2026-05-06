@@ -76,12 +76,12 @@ def align_runs(runs):
 def plot(t, mean, std):
     plt.figure(figsize=(10, 6))
 
-    plt.plot(t, mean, linewidth=2, color="deeppink")
-    plt.fill_between(t, mean - std, mean + std, alpha=0.4, color="deeppink")
+    plt.plot(t, mean, linewidth=2, color="tomato")
+    plt.fill_between(t, mean - std, mean + std, alpha=0.4, color="tomato")
 
     plt.xlabel("Normalized Time")
     plt.ylabel("Voltage (V)")
-    plt.title("LoRa Boot Average Voltage Trace (Mean ± Std)")
+    plt.title("LoRa Boot Average Voltage Trace with idle trimmed (Mean ± Std)")
 
     plt.grid(True, alpha=0.3)
     plt.tight_layout()

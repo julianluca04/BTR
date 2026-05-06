@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/rephased data"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/rephased data"
 DT = 0.002  # resampling resolution (seconds)
 
 # -----------------------
@@ -146,8 +146,8 @@ def plot(time, mean, std, phase_marks):
     fig, ax = plt.subplots(figsize=(16, 6))
 
     # --- mean + std ---
-    ax.plot(time, mean, linewidth=2, color="deeppink")
-    ax.fill_between(time, mean - std, mean + std, alpha=0.4, color="deeppink")
+    ax.plot(time, mean, linewidth=2, color="tomato")
+    ax.fill_between(time, mean - std, mean + std, alpha=0.4, color="tomato")
 
     # --- alternating shaded phase regions ---
     for i in range(len(phase_marks)):
@@ -160,9 +160,9 @@ def plot(time, mean, std, phase_marks):
 
         # alternate shading
         if i % 2 == 0:
-            ax.axvspan(t_start, t_end, alpha=0.15, color="hotpink")
+            ax.axvspan(t_start, t_end, alpha=0.12, color="coral")
         else:
-            ax.axvspan(t_start, t_end, alpha=0.08, color="hotpink")
+            ax.axvspan(t_start, t_end, alpha=0.07, color="coral")
 
     # --- phase labels ---
     xticks = []

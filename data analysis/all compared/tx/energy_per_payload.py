@@ -5,10 +5,12 @@ import matplotlib.pyplot as plt
 
 # ---------------- CONFIG ----------------
 DATASETS = {
-    "WiFi": "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/rephased data",
-    "BLE":  "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/rephased data",
-    "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/rephased data",
+    "WiFi": "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/rephased data",
+    "BLE":  "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/rephased data",
+    "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/rephased data",
 }
+
+V_supply = 5.013517
 
 # ---------------- HELPERS ----------------
 
@@ -36,7 +38,7 @@ def parse_file(path):
     return df, events
 
 
-def compute_energy(df, start, end):
+def compute_energy(df, start, end, V_supply=5.013517):
     mask = (df["timestamp"] >= start) & (df["timestamp"] <= end)
     seg = df.loc[mask].copy()
 
@@ -46,7 +48,9 @@ def compute_energy(df, start, end):
     seg = seg.sort_values("timestamp")
 
     t = (seg["timestamp"] - seg["timestamp"].iloc[0]).dt.total_seconds().values
-    power = seg["v_shunt"].values * seg["current"].values
+
+    current = seg["current"].values
+    power = V_supply * current   # ✅ correct power
 
     return np.trapz(power, t)
 
@@ -80,7 +84,7 @@ def process_dataset(data_dir):
                 if not success:
                     continue
 
-                energy = compute_energy(df, start, end)
+                energy = compute_energy(df, start, end, V_supply)
 
                 if np.isnan(energy):
                     continue
@@ -117,8 +121,8 @@ def plot_all(summaries):
 
     colors = {
         "WiFi": "deeppink",
-        "BLE": "hotpink",
-        "LoRa": "mediumvioletred"
+        "BLE": "lightseagreen",
+        "LoRa": "tomato"
     }
 
     shapes = {

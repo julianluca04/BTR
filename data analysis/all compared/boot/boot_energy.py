@@ -96,7 +96,7 @@ def plot(results):
         x,
         means,
         yerr=ci95s,
-        color=["deeppink", "hotpink", "mediumvioletred"],
+        color=["deeppink", "lightseagreen", "tomato"],
         capsize=6
     )
 
