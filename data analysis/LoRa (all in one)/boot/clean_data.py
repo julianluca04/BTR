@@ -2,110 +2,82 @@ import os
 import pandas as pd
 
 # ---------------- CONFIG ----------------
-INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/experiments/LoRa/Boot up experiment/data/LoRa/boot/20260423_155418"
+INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/experiments/LoRa/julian/loraboot/data/LoRa/boot_energy/20260506_082336"
 OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/boot/clean data"
 
-V_OFFSET = -0.002182e-3  # volts 
+V_OFFSET = -0.002182e-3
 R_MEAN = 1.134584
+
+IDLE_TRIM_SECONDS = 0.5  # keep some idle, not all
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 METER_HEADER = "timestamp,v_shunt,current\n"
 
 # ---------------- HELPERS ----------------
-def trim_tail(df, seconds_to_remove=2.5):
+
+def trim_idle_tail(df, seconds=0.5):
     """
-    Remove last N seconds of recording
+    Keep only the first part of idle phase
     """
-    if df.empty:
+    df = df.sort_values("timestamp").copy()
+
+    idle_df = df[df["phase"].str.contains("idle", case=False, na=False)]
+
+    if idle_df.empty:
         return df
 
-    df = df.sort_values("timestamp")
+    idle_start = idle_df["timestamp"].iloc[0]
+    cutoff = idle_start + pd.Timedelta(seconds=seconds)
 
-    t0 = df["timestamp"].iloc[0]
-    df["time_s"] = (df["timestamp"] - t0).dt.total_seconds()
-
-    max_time = df["time_s"].max()
-    cutoff = max_time - seconds_to_remove
-
-    # keep only early part
-    df = df[df["time_s"] <= cutoff]
-
-    return df.drop(columns=["time_s"])
+    return df[df["timestamp"] <= cutoff]
 
 
 def parse_file(path):
     with open(path, "r") as f:
         lines = f.readlines()
 
-    meta = []
-    data_started = False
-    meter_rows = []
+    run_id = "unknown"
 
-    boot_number = "unknown"
-
+    # --- Extract run id ---
     for line in lines:
-        stripped = line.strip()
+        if line.startswith("# META"):
+            parts = line.strip().split(",")
 
-        # --- META ---
-        if stripped.startswith("# META"):
-            continue
-        elif stripped.startswith("# DATA"):
-            data_started = True
-            continue
+            if len(parts) > 1:
+                raw = parts[1].strip()
 
-        if not data_started:
-            meta.append(line)
+                # Convert "Run_1" -> "1"
+                if "_" in raw:
+                    run_id = raw.split("_")[-1]
+                else:
+                    run_id = raw
 
-            # extract boot number
-            if stripped.startswith("boot_number"):
-                try:
-                    boot_number = stripped.split(",")[1]
-                except:
-                    pass
+            break
 
-        else:
-            # skip header
-            if stripped.startswith("type"):
-                continue
+    # --- LOAD DATA ---
+    df = pd.read_csv(path, comment="#")
+    df.columns = [c.strip() for c in df.columns]
 
-            parts = stripped.split(",")
+    if "timestamp" not in df.columns:
+        return None, run_id
 
-            if len(parts) < 4:
-                continue
-
-            row_type = parts[0]
-
-            if row_type == "METER":
-                timestamp = parts[1]
-                voltage = parts[2]
-
-                try:
-                    v = float(voltage)
-                except:
-                    continue
-
-                meter_rows.append({
-                    "timestamp": timestamp,
-                    "v_shunt": v
-                })
-
-    df = pd.DataFrame(meter_rows)
-
-    if df.empty:
-        return None, boot_number, meta
-
-    # --- Convert types ---
+    # --- CLEAN TYPES ---
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["v_shunt"] = df["v_shunt"].astype(float)
+
     df = df.dropna(subset=["timestamp"])
 
-    # --- Compute current ---
+    # --- REMOVE BASELINE ---
+    df = df[~df["phase"].str.contains("baseline", case=False, na=False)]
+
+    # --- COMPUTE CURRENT ---
     df["current"] = (df["v_shunt"] - V_OFFSET) / R_MEAN
 
-    # --- Trim tail ---
-    df = trim_tail(df, seconds_to_remove=3)
+    # --- TRIM IDLE ---
+    df = trim_idle_tail(df, seconds=IDLE_TRIM_SECONDS)
 
-    return df, boot_number, meta
+    return df, run_id
 
 
 # ---------------- PROCESS ----------------
@@ -113,25 +85,20 @@ def parse_file(path):
 def process_file(filepath):
     name = os.path.basename(filepath)
 
-    df, boot_number, meta = parse_file(filepath)
+    df, run_id = parse_file(filepath)
 
     if df is None or df.empty:
-        return f"Skipped {name} (no valid data)"
+        return f"Skipped {name}"
 
-    # --- Output name ---
-    out_name = f"lora_boot_{boot_number}.csv"
+    out_name = f"lora_boot_{run_id}.csv"
     out_path = os.path.join(OUTPUT_DIR, out_name)
 
-    # --- Write file ---
     with open(out_path, "w") as f:
-
-        # --- META ---
+        # META
         f.write("# META\n")
-        for line in meta:
-            f.write(line)
+        f.write(f"# Run ID: {run_id}\n")
 
-
-        # --- METER ---
+        # METER
         f.write("\n# METER\n")
         f.write(METER_HEADER)
 
