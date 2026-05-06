@@ -13,6 +13,26 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 METER_HEADER = "timestamp,v_shunt,current\n"
 
 # ---------------- HELPERS ----------------
+def trim_tail(df, seconds_to_remove=2.5):
+    """
+    Remove last N seconds of recording
+    """
+    if df.empty:
+        return df
+
+    df = df.sort_values("timestamp")
+
+    t0 = df["timestamp"].iloc[0]
+    df["time_s"] = (df["timestamp"] - t0).dt.total_seconds()
+
+    max_time = df["time_s"].max()
+    cutoff = max_time - seconds_to_remove
+
+    # keep only early part
+    df = df[df["time_s"] <= cutoff]
+
+    return df.drop(columns=["time_s"])
+
 
 def parse_file(path):
     with open(path, "r") as f:
@@ -81,6 +101,9 @@ def parse_file(path):
 
     # --- Compute current ---
     df["current"] = (df["v_shunt"] - V_OFFSET) / R_MEAN
+
+    # --- Trim tail ---
+    df = trim_tail(df, seconds_to_remove=3)
 
     return df, boot_number, meta
 
