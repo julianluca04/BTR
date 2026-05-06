@@ -165,7 +165,7 @@ def plot(summary):
     ax.set_xticklabels(summary["payload"])
     ax.set_xlabel("Payload size (bytes)")
     ax.set_ylabel("Energy (mJ)")
-    ax.set_title("WiFi Payload Size vs Energy Consumption (95% CI)")
+    ax.set_title("BLE Payload Size vs Energy Consumption (95% CI)")
     ax.grid(True)
 
     # --- INSET ZOOM for low payload sizes ---

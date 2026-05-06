@@ -30,29 +30,15 @@ def parse_file(path):
 
     df = pd.read_csv(path, skiprows=meter_idx + 1)
     df.columns = [c.strip() for c in df.columns]
+    df = pd.read_csv(path, skiprows=meter_idx + 1)
+
+    df["phase"] = df["phase"].astype(str)
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df["v_shunt"] = df["v_shunt"].astype(float)
     df["current"] = df["current"].astype(float)
 
     return df, events
-
-
-def compute_energy(df, start, end, V_supply=5.013517):
-    mask = (df["timestamp"] >= start) & (df["timestamp"] <= end)
-    seg = df.loc[mask].copy()
-
-    if len(seg) < 2:
-        return np.nan
-
-    seg = seg.sort_values("timestamp")
-
-    t = (seg["timestamp"] - seg["timestamp"].iloc[0]).dt.total_seconds().values
-
-    current = seg["current"].values
-    power = V_supply * current   # ✅ correct power
-
-    return np.trapz(power, t)
 
 
 # ---------------- PROCESS ----------------
@@ -64,27 +50,34 @@ def process_dataset(data_dir):
 
     for f in files:
         path = os.path.join(data_dir, f)
-        df, events = parse_file(path)
+        df, _ = parse_file(path)
 
-        for ev in events:
+        if "phase" not in df.columns:
+            continue
+
+        # --- keep only TX phases ---
+        df = df[df["phase"].str.contains("tx", case=False, na=False)].copy()
+
+        if df.empty:
+            continue
+
+        # --- identify contiguous phase blocks ---
+        df["block"] = (df["phase"] != df["phase"].shift()).cumsum()
+
+        for (_, phase), group in df.groupby(["block", "phase"]):
             try:
-                if len(ev) >= 7:
-                    payload = int(ev[1])
-                    start = pd.to_datetime(ev[4])
-                    end = pd.to_datetime(ev[5])
-                    success = ev[6].strip() == "True"
-                elif len(ev) == 6:
-                    payload = int(ev[0])
-                    start = pd.to_datetime(ev[1])
-                    end = pd.to_datetime(ev[3])
-                    success = ev[5].strip() == "True"
-                else:
+                if len(group) < 2:
                     continue
 
-                if not success:
-                    continue
+                # extract payload from phase name (e.g. tx_64 → 64)
+                payload = int(phase.split("_")[-1])
 
-                energy = compute_energy(df, start, end, V_supply)
+                group = group.sort_values("timestamp")
+
+                t = (group["timestamp"] - group["timestamp"].iloc[0]).dt.total_seconds().values
+                power = V_supply * group["current"].values
+
+                energy = np.trapz(power, t)
 
                 if np.isnan(energy):
                     continue
