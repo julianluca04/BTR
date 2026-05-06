@@ -161,8 +161,8 @@ def plot_all(summaries):
 
         plt.errorbar(
             x,
-            summary["mean_energy"] * 1000,
-            yerr=summary["ci95"] * 1000,
+            summary["mean_energy"],
+            yerr=summary["ci95"],
             fmt=shapes[name] + "-",
             capsize=4,
             linewidth=2,
@@ -177,7 +177,7 @@ def plot_all(summaries):
     plt.xticks(xticks, xlabels, rotation=45)
 
     plt.xlabel("Payload size (bytes)")
-    plt.ylabel("Energy (mJ)")
+    plt.ylabel("Energy (J)")
     plt.title("Energy vs Payload Size (WiFi vs BLE vs LoRa)")
     plt.grid(True, alpha=0.3)
     plt.legend()

@@ -10,6 +10,8 @@ DATASETS = {
     "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/boot/clean data",
 }
 
+V_supply = 5.013517
+
 # ----------------------------------------
 
 
@@ -41,10 +43,23 @@ def compute_energy(df):
     if len(df) < 2:
         return np.nan
 
-    t = df["time_s"].values
-    power = df["v_shunt"].values * df["current"].values
+    # --- sort to be safe ---
+    df = df.sort_values("timestamp").copy()
 
-    return np.trapz(power, t)
+    # --- recompute time ---
+    t0 = df["timestamp"].iloc[0]
+    t = (df["timestamp"] - t0).dt.total_seconds().values
+
+    # --- compute current (already correct) ---
+    current = df["current"].values
+
+    # --- CORRECT power ---
+    power = V_supply * current
+
+    # --- integrate ---
+    energy = np.trapz(power, t)
+
+    return energy
 
 
 # ---------------- PROCESS ----------------
@@ -85,8 +100,8 @@ def summarize(energies):
 def plot(results):
     labels = list(results.keys())
 
-    means = [results[k][0] * 1000 for k in labels]   # mJ
-    ci95s = [results[k][2] * 1000 for k in labels]
+    means = [results[k][0] for k in labels]   # J
+    ci95s = [results[k][2] for k in labels]
 
     x = np.arange(len(labels))
 
@@ -102,7 +117,7 @@ def plot(results):
 
     plt.yscale("log")
     plt.xticks(x, labels)
-    plt.ylabel("Boot Energy (mJ)")
+    plt.ylabel("Boot Energy (J)")
     plt.title("Boot Energy Comparison (Mean ± 95% CI)")
 
     plt.grid(axis="y", alpha=0.3)
