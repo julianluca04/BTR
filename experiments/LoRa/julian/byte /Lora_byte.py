@@ -12,11 +12,12 @@ RX_PORT = "/dev/cu.usbmodem21201"
 BAUD_LORA = 57600
 DMM_ADDR = 'USB0::2733::309::020633987::0::INSTR'
 
-# Doubling progression: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+# Doubling progression: [1, 2, 4, ..., 65536]
 TOTAL_SIZES = [2**i for i in range(15)] 
 TOTAL_RUNS = 30
 IDLE_S = 1.0        
 BASELINE_S = 5.0    
+
 
 # Setup Directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -49,7 +50,7 @@ def meter_stream(meter, csv_writer, stop_event, file_handle):
 # --- LORA UTILITIES ---
 def cmd(ser, command):
     ser.write((command + "\r\n").encode())
-    time.sleep(0.1) 
+    time.sleep(0.1) # Shorter delay for the 1-byte logic
 
 def configure_loras(tx, rx):
     print("\n[→] Initializing LoRa Hardware...")
@@ -97,13 +98,15 @@ def run_one_experiment(run_num, meter, tx_ser):
             bytes_sent = 0
             
             while bytes_sent < total_bytes:
-                # Strictly 1 byte sent over serial to the module
+                # Payload is exactly 1 byte (hex "AA")
                 hex_payload = "AA"
                 
+                # Clear buffer and send single byte
                 tx_ser.reset_input_buffer()
                 tx_ser.write(f"radio tx {hex_payload}\r\n".encode())
                 
-                # Handshake: The "Atomic" 1-byte send
+                # Handshake: Wait for module to finish physical transmission
+                # For 1 byte at SF8, this is very fast, but still needs a hardware confirm
                 tx_confirmed = False
                 deadline = time.time() + 5.0
                 while time.time() < deadline:
@@ -114,6 +117,7 @@ def run_one_experiment(run_num, meter, tx_ser):
                             break
                 
                 bytes_sent += 1
+                # Update progress every 10 bytes to keep terminal clean
                 if bytes_sent % 10 == 0 or bytes_sent == total_bytes:
                     print(f"    Progress: {bytes_sent}/{total_bytes} bytes", end="\r")
 
@@ -152,5 +156,3 @@ if __name__ == "__main__":
         tx_ser.close()
         rx_ser.close()
         meter.close()
-        
-        
