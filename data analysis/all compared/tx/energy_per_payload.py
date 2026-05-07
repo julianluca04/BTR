@@ -184,7 +184,7 @@ def plot_all(summaries):
     for name in ["BLE", "LoRa"]:
         summary = summaries[name]
 
-        zoom = summary[summary["payload"] <= 128]
+        zoom = summary[summary["payload"] <= 64]
         x = [x_map[p] for p in zoom["payload"]]
 
         axins.errorbar(

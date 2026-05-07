@@ -10,6 +10,8 @@ DATASETS = {
     "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/rephased data",
 }
 
+v_supply = 5.013517
+
 # ----------------------------------------
 
 
@@ -52,10 +54,11 @@ def compute_idle_metrics(df):
 
     v = idle_df["v_shunt"].values
     i = idle_df["current"].values
+    p = v_supply * i # device power
 
 
     mean_voltage = np.mean(v)
-    mean_power = np.mean(v * i)
+    mean_power = np.mean(p)
     mean_current = np.mean(i)
 
     return mean_voltage, mean_power, mean_current
@@ -158,7 +161,7 @@ def main():
     # ---- PLOTS ----
     plot(voltage_results, "Idle Voltage (V)")
     plot(current_results, "Idle Current (A)", scale=1e3)
-    plot(power_results, "Idle Power (mW)", scale=1000)
+    plot(power_results, "Idle Power (W)")
 
 
 if __name__ == "__main__":
