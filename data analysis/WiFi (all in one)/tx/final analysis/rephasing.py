@@ -2,8 +2,8 @@ import os
 import pandas as pd
 
 # ---------------- CONFIG ----------------
-INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/clean data"
-OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/rephased data"
+INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/final analysis/clean data"
+OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/final analysis/rephased data"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -89,12 +89,6 @@ def process_file(path):
     df = pd.read_csv(path, skiprows=header_line)
     df.columns = [c.strip() for c in df.columns]
 
-    # --- remove final idle phase BEFORE reassigning ---
-    if not df.empty and df["phase"].iloc[-1] == "idle":
-        # group contiguous blocks
-        df["block"] = (df["phase"] != df["phase"].shift()).cumsum()
-        last_block = df["block"].iloc[-1]
-        df = df[df["block"] != last_block]
 
     # --- apply new phase logic ---
     df = reassign_phases(df)

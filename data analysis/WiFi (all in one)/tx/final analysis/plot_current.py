@@ -4,8 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-CLEAN_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/clean data"
-REPHASED_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/rephased data"
+CLEAN_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/final analysis/clean data"
+REPHASED_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/final analysis/rephased data"
 
 DT = 0.002  # resampling resolution (seconds)
 
@@ -118,8 +118,6 @@ def build_global_signal(aligned_segments):
     """
     Stitch segments back into one continuous signal
     """
-    if aligned_segments and aligned_segments[-1]["phase"] == "idle":
-        aligned_segments = aligned_segments[:-1]
 
     mean_all = []
     std_all = []
