@@ -4,8 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-CLEAN_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/final analysis/clean data"
-REPHASED_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/final analysis/rephased data"
+CLEAN_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/final analysis/clean data"
+REPHASED_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/final analysis/rephased data"
 
 DT = 0.002  # resampling resolution (seconds)
 
@@ -144,13 +144,13 @@ def build_global_signal(aligned_segments):
 
 def plot_subplot(ax, time, mean, std, phase_marks, title):
     # --- mean + std ---
-    ax.plot(time, mean, linewidth=2, color="deeppink")
+    ax.plot(time, mean, linewidth=2, color="lightseagreen")
     ax.fill_between(
         time,
         mean - std,
         mean + std,
         alpha=0.35,
-        color="deeppink"
+        color="lightseagreen"
     )
 
     # --- alternating background regions ---
@@ -169,7 +169,7 @@ def plot_subplot(ax, time, mean, std, phase_marks, title):
             t_start,
             t_end,
             alpha=alpha,
-            color="hotpink"
+            color="paleturquoise"
         )
 
     # --- labels ---
@@ -215,14 +215,14 @@ def plot_comparison(clean_data, rephased_data):
     plot_subplot(
         axes[0],
         *clean_data,
-        title="Original Data Phase-aligned Average Current Trace WiFi"
+        title="Original Data Phase-aligned Average Current Trace BLE"
     )
 
     # --- REPHASED ---
     plot_subplot(
         axes[1],
         *rephased_data,
-        title="Rephased Data Phase-aligned Average Current Trace WiFi"
+        title="Rephased Data Phase-aligned Average Current Trace BLE"
     )
 
     axes[1].annotate("Time →", xy=(1.0, -0.15), xycoords="axes fraction", ha="right")
@@ -230,16 +230,13 @@ def plot_comparison(clean_data, rephased_data):
     plt.tight_layout()
     plt.show()
 
-
 def compute_baseline_stats(runs):
     """
     Compute baseline current statistics across all runs
     """
-
     baseline_currents = []
 
     for df in runs:
-
         baseline_df = df[
             df["phase"].str.lower() == "baseline"
         ]
@@ -267,24 +264,13 @@ def compute_baseline_stats(runs):
         "n": n
     }
 
-
 def print_baseline_stats(name, stats):
-
     print(f"\n=== {name} BASELINE CURRENT ===")
-
     print(f"Samples: {stats['n']}")
+    print( f"Mean:  {stats['mean_A'] * 1e3:.3f} mA")
+    print( f"Std:   {stats['std_A'] * 1e3:.3f} mA")
+    print( f"95% CI: ±{stats['ci95_A'] * 1e3:.3f} mA")
 
-    print(
-        f"Mean:  {stats['mean_A'] * 1e3:.3f} mA"
-    )
-
-    print(
-        f"Std:   {stats['std_A'] * 1e3:.3f} mA"
-    )
-
-    print(
-        f"95% CI: ±{stats['ci95_A'] * 1e3:.3f} mA"
-    )
 
 def main():
 

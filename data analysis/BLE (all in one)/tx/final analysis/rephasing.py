@@ -2,7 +2,7 @@ import os
 import pandas as pd
 
 # ---------------- CONFIG ----------------
-INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/first processing/clean data"
+INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/clean data"
 OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/rephased data"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
