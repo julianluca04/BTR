@@ -3,7 +3,7 @@ import pandas as pd
 
 # ---------------- CONFIG ----------------
 INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/experiments/WiFi/Boot up experiment/data/esp32/boot/best"
-OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/boot/clean data"
+OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/boot/trimmed/trimmed data"
 
 V_OFFSET = -0.002182e-3  # volts 
 R_MEAN = 1.134584
