@@ -3,7 +3,7 @@ import pandas as pd
 
 # ---------------- CONFIG ----------------
 INPUT_DIR = "/Users/jude/Documents/GitHub/BTR/experiments/BLE/Boot up experiment/data/ble_nrf52/boot/BEST"
-OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/boot/clean data"
+OUTPUT_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/boot/trimmed/trimmed data"
 
 V_OFFSET = -0.002182e-3  # volts 
 R_MEAN = 1.134584

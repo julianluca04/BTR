@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/boot/clean data"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/boot/untrimmed/untrimmed data"
 N_POINTS = 1000  # resolution of final curve
 # -----------------------
 
@@ -27,7 +27,7 @@ def load_runs(folder):
         df.columns = [c.strip() for c in df.columns]
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df["v_shunt"] = df["v_shunt"].astype(float)
+        df["current"] = df["current"].astype(float)
 
         df = df.dropna(subset=["timestamp"])
 
@@ -42,15 +42,15 @@ def load_runs(folder):
 
 def resample_run(df, n_points=N_POINTS):
     t = df["time_s"].values
-    v = df["v_shunt"].values
+    c = df["current"].values
 
     if len(t) < 2:
         return None
 
     t_norm = np.linspace(t.min(), t.max(), n_points)
-    v_interp = np.interp(t_norm, t, v)
+    c_interp = np.interp(t_norm, t, c)
 
-    return t_norm, v_interp
+    return t_norm, c_interp
 
 
 def align_runs(runs):
@@ -59,8 +59,8 @@ def align_runs(runs):
     for df in runs:
         result = resample_run(df)
         if result is not None:
-            _, v = result
-            resampled.append(v)
+            _, c = result
+            resampled.append(c)
 
     resampled = np.array(resampled)
 
@@ -80,8 +80,8 @@ def plot(t, mean, std):
     plt.fill_between(t, mean - std, mean + std, alpha=0.4, color="lightseagreen")
 
     plt.xlabel("Normalized Time")
-    plt.ylabel("Voltage (V)")
-    plt.title("BLE Boot Average Voltage Trace with idle trimmed (Mean ± Std)")
+    plt.ylabel("Current (A)")
+    plt.title("BLE Boot Average Current Trace (Mean ± Std)")
 
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
