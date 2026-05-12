@@ -10,7 +10,10 @@ DATASETS = {
     "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/final analysis/rephased data",
 }
 
-V_supply = 5.013517
+V_supply = {}
+V_supply["WiFi"] = 5.013517
+V_supply["BLE"] = 5.013517
+V_supply["LoRa"] = 5.011090
 
 # ---------------- HELPERS ----------------
 
@@ -43,7 +46,7 @@ def parse_file(path):
 
 # ---------------- PROCESS ----------------
 
-def process_dataset(data_dir):
+def process_dataset(data_dir, name):
     results = []
 
     files = [f for f in os.listdir(data_dir) if f.endswith(".csv")]
@@ -75,7 +78,7 @@ def process_dataset(data_dir):
                 group = group.sort_values("timestamp")
 
                 t = (group["timestamp"] - group["timestamp"].iloc[0]).dt.total_seconds().values
-                power = V_supply * group["current"].values
+                power = V_supply[name] * group["current"].values
 
                 energy = np.trapz(power, t)
 
@@ -216,7 +219,7 @@ def main():
 
     for name, path in DATASETS.items():
         print(f"\nProcessing {name}...")
-        df = process_dataset(path)
+        df = process_dataset(path, name)
 
         summary = summarize(df)
         summaries[name] = summary

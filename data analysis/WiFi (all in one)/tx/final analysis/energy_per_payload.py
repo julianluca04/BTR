@@ -102,7 +102,7 @@ def compute_phase_energies(df):
         # relative time axis
         t = (
             group["timestamp"] - group["timestamp"].iloc[0]
-        ).dt.total_seconds().values
+        ).dt.total_seconds().values 
 
         current = group["current"].values
 
