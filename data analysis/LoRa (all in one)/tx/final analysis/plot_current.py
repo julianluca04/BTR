@@ -271,6 +271,47 @@ def print_baseline_stats(name, stats):
     print( f"Std:   {stats['std_A'] * 1e3:.3f} mA")
     print( f"95% CI: ±{stats['ci95_A'] * 1e3:.3f} mA")
 
+def compute_max_current_stats(runs):
+    """
+    Compute maximum current statistics across all runs
+    """
+    two_currents = []
+
+    for df in runs:
+        max_df = df[
+            df["phase"].str.lower() == "tx_220"
+        ]
+        if max_df.empty:
+            continue
+        two_currents.extend(
+            max_df["current"].values
+        )
+
+    two_currents = np.array(two_currents)
+    mean_A = np.mean(two_currents)
+    std_A = np.std(two_currents)
+    max_A = np.max(two_currents)
+
+    n = len(two_currents)
+
+    ci95_A = 1.96 * std_A / np.sqrt(n)
+
+    return {
+        "mean_A": mean_A,
+        "std_A": std_A,
+        "ci95_A": ci95_A,
+        "max_A": max_A,
+        "n": n
+    }
+
+def print_max_current_stats(name, stats):
+    print(f"\n=== {name} MAXIMUM CURRENT ===")
+    print(f"Samples: {stats['n']}")
+    print( f"Mean:  {stats['mean_A'] * 1e3:.3f} mA")
+    print( f"Std:   {stats['std_A'] * 1e3:.3f} mA")
+    print( f"95% CI: ±{stats['ci95_A'] * 1e3:.3f} mA")
+    print( f"Max:   {stats['max_A'] * 1e3:.3f} mA")
+
 
 def main():
 
@@ -295,6 +336,11 @@ def main():
     # ---------------- BASELINE STATS ----------------
     clean_baseline_stats = compute_baseline_stats(clean_runs)
     print_baseline_stats("CLEAN", clean_baseline_stats)
+
+
+    # ---------------- Max tx STATS ----------------
+    rephased_max_stats = compute_max_current_stats(rephased_runs)
+    print_max_current_stats("REPHASED", rephased_max_stats)
 
     # ---------------- PLOT ----------------
     plot_comparison(clean_data, rephased_data)

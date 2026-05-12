@@ -5,12 +5,15 @@ import matplotlib.pyplot as plt
 
 # ---------------- CONFIG ----------------
 DATASETS = {
-    "WiFi": "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/boot/clean data",
-    "BLE":  "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/boot/clean data",
-    "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/boot/clean data",
+    "WiFi": "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/boot/trimmed/trimmed data",
+    "BLE":  "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/boot/trimmed/trimmed data",
+    "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/boot/trimmed/trimmed data",
 }
 
-V_supply = 5.013517
+V_supply = {}
+V_supply["WiFi"] = 5.013517
+V_supply["BLE"] = 5.013517
+V_supply["LoRa"] = 5.013517
 
 # ----------------------------------------
 
@@ -39,7 +42,7 @@ def load_file(path):
     return df
 
 
-def compute_energy(df):
+def compute_energy(df, v_supply):
     if len(df) < 2:
         return np.nan
 
@@ -54,7 +57,7 @@ def compute_energy(df):
     current = df["current"].values
 
     # --- CORRECT power ---
-    power = V_supply * current
+    power = v_supply * current
 
     # --- integrate ---
     energy = np.trapz(power, t)
@@ -64,7 +67,7 @@ def compute_energy(df):
 
 # ---------------- PROCESS ----------------
 
-def process_dataset(folder):
+def process_dataset(folder, v_supply):
     energies = []
 
     for f in os.listdir(folder):
@@ -75,7 +78,7 @@ def process_dataset(folder):
 
         df = load_file(path)
 
-        E = compute_energy(df)
+        E = compute_energy(df, v_supply)
 
         if not np.isnan(E):
             energies.append(E)
@@ -134,7 +137,7 @@ def main():
     for name, path in DATASETS.items():
         print(f"\nProcessing {name}...")
 
-        energies = process_dataset(path)
+        energies = process_dataset(path, V_supply[name])
 
         mean, std, ci95 = summarize(energies)
 

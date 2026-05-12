@@ -5,9 +5,9 @@ import matplotlib.pyplot as plt
 
 # ---------------- CONFIG ----------------
 DATASETS = {
-    "WiFi": "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/rephased data",
-    "BLE":  "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/rephased data",
-    "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/rephased data",
+    "WiFi": "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/final analysis/rephased data",
+    "BLE":  "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/final analysis/rephased data",
+    "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/final analysis/rephased data",
 }
 
 V_supply = 5.013517
@@ -189,8 +189,8 @@ def plot_all(summaries):
 
         axins.errorbar(
             x,
-            zoom["mean_energy"] * 1000,
-            yerr=zoom["ci95"] * 1000,
+            zoom["mean_energy"],
+            yerr=zoom["ci95"],
             fmt=shapes[name] + "-",
             capsize=3,
             linewidth=1.8,
@@ -198,11 +198,11 @@ def plot_all(summaries):
             label=name
         )
 
-    zoom_payloads = [p for p in all_payloads if p <= 128]
+    zoom_payloads = [p for p in all_payloads if p <= 64]
     axins.set_xticks([x_map[p] for p in zoom_payloads])
     axins.set_xticklabels([p for p in zoom_payloads], fontsize=7, rotation=45)
 
-    axins.set_title("Zoom: BLE & LoRa (1–128 bytes)", fontsize=9)
+    axins.set_title("Zoom: BLE & LoRa (1–64 bytes)", fontsize=9)
     axins.grid(True, alpha=0.3)
 
     plt.tight_layout()

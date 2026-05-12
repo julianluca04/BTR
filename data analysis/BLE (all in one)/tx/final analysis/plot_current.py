@@ -163,7 +163,7 @@ def plot_subplot(ax, time, mean, std, phase_marks, title):
             t_end = time[-1]
 
         # alternate strictly by index
-        alpha = 0.12 if idx % 2 == 0 else 0.05
+        alpha = 0.3 if idx % 2 == 0 else 0.12
 
         ax.axvspan(
             t_start,

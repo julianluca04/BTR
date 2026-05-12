@@ -5,15 +5,17 @@ import matplotlib.pyplot as plt
 
 # ---------------- CONFIG ----------------
 DATASETS = {
-    "WiFi": "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/rephased data",
-    "BLE":  "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/rephased data",
-    "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/rephased data",
+    "WiFi": "/Users/jude/Documents/GitHub/BTR/data analysis/WiFi (all in one)/tx/final analysis/rephased data",
+    "BLE":  "/Users/jude/Documents/GitHub/BTR/data analysis/BLE (all in one)/tx/final analysis/rephased data",
+    "LoRa": "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/tx/final analysis/rephased data",
 }
-
-v_supply = 5.013517
 
 # ----------------------------------------
 
+V_supply = {}
+V_supply["WiFi"] = 5.013517
+V_supply["BLE"] = 5.013517
+V_supply["LoRa"] = 5.011090
 
 # ---------------- HELPERS ----------------
 
@@ -40,7 +42,7 @@ def load_file(path):
 
 # ---------------- IDLE METRICS ----------------
 
-def compute_idle_metrics(df):
+def compute_idle_metrics(df, v_supply):
     """
     Returns:
         mean_voltage (V)
@@ -66,7 +68,7 @@ def compute_idle_metrics(df):
 
 # ---------------- PROCESS ----------------
 
-def process_dataset(folder):
+def process_dataset(folder, v_supply):
     voltages = []
     powers = []
     currents = []
@@ -79,7 +81,7 @@ def process_dataset(folder):
 
         df = load_file(path)
 
-        v, p, i = compute_idle_metrics(df)
+        v, p, i = compute_idle_metrics(df, v_supply)
 
         if not np.isnan(v):
             voltages.append(v)
@@ -143,7 +145,7 @@ def main():
     for name, path in DATASETS.items():
         print(f"\nProcessing {name}...")
 
-        voltages, powers, currents = process_dataset(path)
+        voltages, powers, currents = process_dataset(path, V_supply[name])
 
         v_mean, v_std, v_ci = summarize(voltages)
         p_mean, p_std, p_ci = summarize(powers)
@@ -160,7 +162,7 @@ def main():
 
     # ---- PLOTS ----
     plot(voltage_results, "Idle Voltage (V)")
-    plot(current_results, "Idle Current (A)", scale=1e3)
+    plot(current_results, "Idle Current (mA)", scale=1e3)
     plot(power_results, "Idle Power (W)")
 
 
