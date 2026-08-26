@@ -115,6 +115,11 @@ def plot(results, ylabel, scale=1):
 
     x = np.arange(len(labels))
 
+    # Source - https://stackoverflow.com/a/3900167
+    font = {'size'   : 18}
+    plt.rc('font', **font)
+
+
     plt.figure(figsize=(8, 6))
 
     plt.bar(
