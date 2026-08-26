@@ -1,0 +1,4 @@
+Metric,Mean,Std,Uncertainty
+Resistance,1.134584,0.001448,0.001448
+Voltage,5.020379,0.000356,0.000356
+Offset,-0.0000021800,0,0.0000000042
