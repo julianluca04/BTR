@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/LoRa (all in one)/boot/untrimmed/untrimmed data"
+DATA_DIR = "/Users/jude/Documents/GitHub/BTR/data analysis/Jude/LoRa (all in one)/boot/untrimmed/untrimmed data"
 N_POINTS = 1000  # resolution of final curve
 # -----------------------
 
@@ -74,6 +74,9 @@ def align_runs(runs):
 
 
 def plot(t, mean, std):
+    font = {'size'   : 18}
+    plt.rc('font', **font)
+
     plt.figure(figsize=(10, 6))
 
     plt.plot(t, mean, linewidth=2, color="tomato")
