@@ -11,9 +11,9 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
 
 # --- Configuration ---
 
-BASE_PATH = r'/Users/foml/Library/Mobile Documents/com~apple~CloudDocs/important/coding/MSP/year_3/Thesis work/BTR_results/data'
-SAVE_PATH = r'/Users/foml/Library/Mobile Documents/com~apple~CloudDocs/important/coding/MSP/year_3/Thesis work/BTR_results/plots/7-master_comparison'
-CALIB_PATH = r'/Users/foml/Library/Mobile Documents/com~apple~CloudDocs/important/coding/MSP/year_3/Thesis work/BTR_results/calibration_constants_summary.csv'
+BASE_PATH = r'/Users/jude/Documents/GitHub/BTR/data analysis/Julian/data'
+SAVE_PATH = r'/Users/jude/Documents/GitHub/BTR/data analysis/Julian/plots/7-master_comparison'
+CALIB_PATH = r'/Users/jude/Documents/GitHub/BTR/data analysis/Julian/calibration_constants_summary.csv'
 
 
 
@@ -22,9 +22,9 @@ print(f"Saving plots to: {SAVE_PATH}")
 
 # Fixed color mapping
 PROTOCOL_COLORS = {
-    'WIFI': 'orange',
-    'BLE': 'blue',
-    'LORA': 'red'
+    'WIFI': 'deeppink',
+    'BLE': 'lightseagreen',
+    'LORA': 'tomato'
 }
 
 METHOD_COLORS = {
@@ -95,6 +95,7 @@ def process_file(file_path):
     return results
 
 def apply_plot_formatting(fig, ax, plot_df, hue_val, title):
+
     ax.set_xscale('log', base=2)
     ax.set_yscale('log')
     ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
@@ -108,10 +109,10 @@ def apply_plot_formatting(fig, ax, plot_df, hue_val, title):
     if handles:
         ax.get_legend().remove()
         fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 0.92), 
-                   ncol=3, frameon=True, fontsize=9)
+                   ncol=3, frameon=True, fontsize=12)
 
     # Inset Window (Top Right)
-    ax_ins = inset_axes(ax, width="35%", height="35%", loc='upper right', borderpad=3)
+    '''ax_ins = inset_axes(ax, width="35%", height="35%", loc='upper right', borderpad=3)
     zoom_df = plot_df[plot_df['Payload'] <= 16]
     if not zoom_df.empty:
         palette = METHOD_COLORS if hue_val == "Method" else PROTOCOL_COLORS
@@ -133,8 +134,9 @@ def apply_plot_formatting(fig, ax, plot_df, hue_val, title):
         ax_ins.set_ylabel("mJ/Byte", fontsize=7)
         ax_ins.tick_params(labelsize=6)
         mark_inset(ax, ax_ins, loc1=2, loc2=4, fc="none", ec="0.5", ls="--", alpha=0.4)
+        '''
 
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=60)
+    ax.set_title(title, fontsize=20, fontweight='bold', pad=60)
     ax.set_xlabel("Payload Size (Bytes)", fontweight='bold')
     ax.set_ylabel("Energy Efficiency (mJ per Byte)", fontweight='bold')
 
@@ -164,6 +166,7 @@ def run():
         )
         apply_plot_formatting(fig, ax, pdf, "Method", f"{p}: Efficiency Comparison by Transfer Method")
 
+
         png_path = os.path.join(SAVE_PATH, f"proto_{p.lower()}.png")
         svg_path = os.path.join(SAVE_PATH, f"proto_{p.lower()}.svg")
 
@@ -189,6 +192,7 @@ def run():
             errorbar=('ci', 95)
         )
         apply_plot_formatting(fig, ax, mdf, "Protocol", f"{m} Method: Protocol Efficiency Comparison")
+
 
         png_path = os.path.join(SAVE_PATH, f"meth_{m.lower()}.png")
         svg_path = os.path.join(SAVE_PATH, f"meth_{m.lower()}.svg")
